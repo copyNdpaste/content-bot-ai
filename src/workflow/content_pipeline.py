@@ -283,29 +283,43 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
             f"본문 {limit}자 이내. 해시태그 5~10개 (도배 X, 자연스럽게). "
             f"본문 분위기에 어울리는 **AI 이미지 생성용 영문 프롬프트** 도 image_keyword 에 함께 출력. "
             f"\n"
-            f"🚨 매우 중요 — 사람 얼굴·손 생성 절대 금지:\n"
-            f"  AI 가 사람 정면·클로즈업 만들면 80% 확률로 괴물처럼 망가짐. 반드시 다음 컨셉 중 1개로:\n"
-            f"  ① flatlay (음식·화장품·책·카메라·꽃 등 위에서 본 사물 배치)\n"
-            f"  ② 뒷모습·실루엣·일부만 (걷는 뒷모습, 손 그림자, 발만)\n"
-            f"  ③ 풍경·인테리어 (카페 내부, 거리, 호텔, 서점) — 사람 없이\n"
-            f"  ④ 사물 클로즈업 (커피 한 잔, 책 페이지, 노트북, 폰 화면)\n"
+            f"🚨 매우 중요 — 사람은 OK, 단 얼굴 자체는 반드시 가려져 있어야 함:\n"
+            f"  FLUX 무료가 사람 얼굴·이목구비 그리면 80% 망가짐. 사람 등장은 일상감 살리되 "
+            f"얼굴은 항상 어떤 식으로든 가려서 안전하게.\n"
             f"\n"
-            f"형식: 영문 15~30 단어 + 끝에 반드시 'no people visible, no faces, no hands, "
-            f"film grain, 35mm, instagram aesthetic, no text, no watermark' 톤 가이드 첨부. "
+            f"좋은 얼굴 가림 방법 (다양하게 섞기):\n"
+            f"  - 폰으로 얼굴 가리기 (셀카 찍는 거울 셀카, 폰이 얼굴 가림)\n"
+            f"  - 손으로 얼굴 가리기 (수줍게, 햇빛 가리는 척, 입가에 손)\n"
+            f"  - 모자·후드·마스크로 얼굴 가림 (yk2k 패션, 비니 + 마스크)\n"
+            f"  - 머리카락이 옆모습 가림 (긴 머리 늘어뜨림)\n"
+            f"  - 카메라·책·메뉴판·꽃다발이 얼굴 일부 가림\n"
+            f"  - 뒷모습·옆모습 (얼굴 안 보임)\n"
+            f"  - 실루엣 (역광·창가)\n"
+            f"  - 거울 셀카 (카메라가 얼굴 자리)\n"
+            f"  - 음식·커피 컵이 화면 전면, 사람 손만 보임\n"
+            f"\n"
+            f"형식: 영문 20~35 단어 + 끝에 반드시 'face hidden, no visible face, "
+            f"face out of frame, film grain, 35mm, instagram aesthetic, no text, no watermark' 첨부. "
             f"\n"
             f"좋은 예시:\n"
-            f"  - 'aesthetic flatlay, k-beauty skincare products and matcha latte on marble "
-            f"table, dried flowers, soft morning light, film grain, 35mm, instagram aesthetic, "
-            f"no people, no text, no watermark'\n"
-            f"  - 'cozy tokyo cafe interior, empty wooden table near window, hanging plants, "
-            f"warm afternoon light, no people visible, film grain, instagram aesthetic, no text'\n"
-            f"  - 'shinjuku alley at night, neon signs reflecting on wet pavement, rain, "
-            f"cinematic, no people visible, 35mm film, no text, no watermark'\n"
-            f"  - 'close-up of latte art and croissant on rustic wooden table, side window light, "
-            f"film grain, instagram aesthetic, no people, no text, no watermark'\n"
+            f"  - 'young korean woman taking mirror selfie in cozy cafe, phone covering her face "
+            f"completely, oversized hoodie, k-beauty aesthetic, soft afternoon light, film grain, "
+            f"35mm, face hidden by phone, no visible face, instagram aesthetic, no text, no watermark'\n"
+            f"  - 'girl from behind, long hair, sitting at tokyo cafe window, holding matcha "
+            f"latte, only back of head visible, soft window light, film grain, 35mm, no visible "
+            f"face, instagram aesthetic, no text, no watermark'\n"
+            f"  - 'two friends seoul cafe, both holding cameras covering their faces, oversized "
+            f"sweaters, candid laughter moment, soft morning light, film grain, 35mm, faces "
+            f"hidden by cameras, no visible faces, instagram aesthetic, no text, no watermark'\n"
+            f"  - 'silhouette of girl walking through shinjuku at night, neon lights backlit, "
+            f"only outline visible, cinematic, 35mm film, face out of frame, no visible face, "
+            f"instagram aesthetic, no text, no watermark'\n"
+            f"  - 'hands holding korean snack and matcha latte on rustic table, only forearms "
+            f"and hands visible, cropped composition, soft morning light, film grain, no face, "
+            f"instagram aesthetic, no text, no watermark'\n"
             f"\n"
-            f"❌ 절대 금지 키워드: 'portrait', 'close-up face', 'two girls smiling', "
-            f"'holding hands', 'eye contact', 'looking at camera', 'selfie', 'group of friends'"
+            f"❌ 절대 금지 키워드: 'portrait', 'close-up face', 'smiling face', "
+            f"'eye contact', 'looking at camera' (얼굴 정면), 'two girls smiling at camera'"
         ),
     }.get(platform, "")
 
@@ -488,13 +502,14 @@ def _generate_pollinations_image(prompt: str, *, width: int = 1080, height: int 
     p = (prompt or "").strip()
     if not p:
         return None
-    # 자동 safety suffix — LLM 가이드를 안 따랐을 경우 대비 이중 안전망
+    # 자동 safety suffix — 사람 OK 단 얼굴 가려야 (FLUX 가 얼굴 잘 못 그려서)
     safety_suffix = (
-        ", no people visible, no faces, no hands, no humans, "
-        "no portrait, no close-up of person, film grain, 35mm, "
-        "instagram aesthetic, no text, no watermark, no logo"
+        ", face hidden, no visible face, face out of frame, "
+        "no eye contact, film grain, 35mm, instagram aesthetic, "
+        "no text, no watermark, no logo"
     )
-    if "no people" not in p.lower() and "no faces" not in p.lower():
+    if "face hidden" not in p.lower() and "no visible face" not in p.lower() \
+            and "no people" not in p.lower():
         p = p + safety_suffix
     if seed is None:
         seed = random.randint(1, 1_000_000_000)
