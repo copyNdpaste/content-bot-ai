@@ -37,15 +37,14 @@ import urllib.request
 import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-INSTAGRAM_TOOLS = os.path.join(REPO_ROOT, "assets", "tool-seeds", "instagram")
-SLACK_NOTIFIER = os.path.join(INSTAGRAM_TOOLS, "slack_notifier.py")
-DRAFTS_DIR = os.path.join(
-    REPO_ROOT, "_company", "_agents", "instagram", "tools", "drafts"
-)
-ENV_PATH = os.path.join(
-    REPO_ROOT, "_company", "_agents", "instagram", ".env"
-)
+# content-bot-ai 신규 레이아웃: src/workflow/ → 두 단계 위가 repo root
+REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+SLACK_NOTIFIER = os.path.join(REPO_ROOT, "src", "slack", "slack_notifier.py")
+# drafts 는 repo 안 drafts/ (gitignored). tokens.json 은 src/auth/ 에.
+DRAFTS_DIR = os.path.join(REPO_ROOT, "drafts")
+# .env 는 repo root 에. (옛 money-ai 의 _company/_agents/instagram/.env 도 폴백)
+ENV_PATH = os.path.join(REPO_ROOT, ".env")
+ENV_PATH_LEGACY = os.path.join(REPO_ROOT, "_company", "_agents", "instagram", ".env")
 
 CLAUDE_MODEL = "claude-opus-4-7"  # 박재범 heavy tier
 CLAUDE_TIMEOUT_SEC = 180
@@ -643,6 +642,7 @@ def run_round(platform: str, account: str, theme: str,
 
 def main() -> int:
     _load_env_file(ENV_PATH)
+    _load_env_file(ENV_PATH_LEGACY)  # 옛 money-ai 위치 폴백
 
     ap = argparse.ArgumentParser(description="박재범 자율 컨텐츠 파이프라인")
     ap.add_argument("--platform", required=True,
