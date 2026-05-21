@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.contentbot.content-scheduler</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/hoony/projects/content-bot-ai/.venv/bin/python3</string>
+        <string>/Users/hoony/projects/content-bot-ai/src/workflow/scheduler.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hoony/projects/content-bot-ai</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/contentbot-content-scheduler.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/contentbot-content-scheduler.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- claude CLI 위치 보강 (nvm·brew 양쪽 커버) -->
+        <key>PATH</key>
+        <string>/Users/hoony/.nvm/versions/node/v22.22.2/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- 기본 회차 주기 (시간). .env 의 ROUTINE_INTERVAL_HOURS 가 있으면 그게 우선. -->
+        <key>ROUTINE_INTERVAL_HOURS</key>
+        <string>4</string>
+    </dict>
+</dict>
+</plist>

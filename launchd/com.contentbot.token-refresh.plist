@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.contentbot.token-refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/hoony/projects/content-bot-ai/.venv/bin/python3</string>
+        <string>/Users/hoony/projects/content-bot-ai/src/auth/token_manager.py</string>
+        <string>--refresh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hoony/projects/content-bot-ai</string>
+
+    <!-- 매일 04:00 자동 실행 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- 컴퓨터가 꺼져있던 시간에 예정됐던 실행은 부팅 후 catch-up -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- 로그 (디버깅용) -->
+    <key>StandardOutPath</key>
+    <string>/tmp/contentbot-token-refresh.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/contentbot-token-refresh.err</string>
+
+    <!-- 환경변수 (PATH 보강 — Homebrew 등) -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

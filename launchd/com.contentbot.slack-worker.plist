@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.contentbot.slack-worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/hoony/projects/content-bot-ai/.venv/bin/python3</string>
+        <string>/Users/hoony/projects/content-bot-ai/src/slack/slack_approval_worker.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hoony/projects/content-bot-ai</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/contentbot-slack-worker.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/contentbot-slack-worker.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- 아래 3개를 실제 토큰으로 채운 후
+             launchctl unload/load 로 워커를 재시작하세요.
+             가이드: /Users/hoony/projects/content-bot-ai/assets/tool-seeds/instagram/slack_setup.md -->
+        <key>SLACK_BOT_TOKEN</key>
+        <string></string>
+        <key>SLACK_APP_TOKEN</key>
+        <string></string>
+        <key>SLACK_CHANNEL_ID</key>
+        <string></string>
+    </dict>
+</dict>
+</plist>

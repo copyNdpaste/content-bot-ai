@@ -1,0 +1,11 @@
+[project]
+name = "content-bot-ai"
+version = "0.1.0"
+description = "한일 SNS 자동 컨텐츠 봇 — Threads/Instagram/X 멀티 계정"
+requires-python = ">=3.10"
+dependencies = [
+    "slack-sdk>=3.33.0",  # Slack interactive worker
+]
+
+[tool.uv]
+package = false
