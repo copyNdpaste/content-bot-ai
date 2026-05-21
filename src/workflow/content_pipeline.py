@@ -275,10 +275,16 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
         "instagram": (
             f"Instagram — 감성 일상 느낌. 사진 설명 같은 톤. 정보 전달형 금지. "
             f"본문 {limit}자 이내. 해시태그 5~10개 (도배 X, 자연스럽게). "
-            f"본문 분위기에 어울리는 사진 키워드 (영문 2~4단어) 도 image_keyword 에 함께 출력. "
-            f"한일 친구·카페·여행·OOTD·셀프케어 등 인스타 검색 잘 되는 톤 "
-            f"(예: 'tokyo cafe friends', 'seoul night market', 'cherry blossom picnic', "
-            f"'cozy cafe seoul', 'japanese street fashion')."
+            f"본문 분위기에 어울리는 **AI 이미지 생성용 영문 프롬프트** 도 image_keyword 에 함께 출력. "
+            f"형식: 사람·장면·조명·분위기·스타일 포함 15~30 단어, 끝에 'no text, no watermark, "
+            f"instagram aesthetic, candid' 같은 톤 가이드 첨부. "
+            f"예시:\n"
+            f"  - 'two friends, korean and japanese girls in their 20s, cozy tokyo cafe, "
+            f"soft afternoon light, candid laughing moment, film grain, no text, no watermark'\n"
+            f"  - 'aesthetic flatlay, k-beauty skincare products and matcha latte on marble "
+            f"table, soft morning light, instagram aesthetic, no text'\n"
+            f"  - 'solo travel girl walking through shinjuku at night, neon lights reflecting, "
+            f"35mm film look, dreamy mood, no text, no watermark'"
         ),
     }.get(platform, "")
 
@@ -346,7 +352,7 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
             '{"text": "<게시될 본문 전체>", '
             '"hook": "<첫 한 줄>", '
             '"hashtags": ["<있으면 태그>"], '
-            '"image_keyword": "<영문 2~4단어 — 본문 분위기와 매칭되는 사진 검색 키워드, '
+            '"image_keyword": "<IG 일 때만 — 영문 15~30단어, AI 이미지 생성 프롬프트 (사람·장면·조명·분위기 + no text, no watermark),'
             "예: 'tokyo cafe friends', 'seoul night market'>\"}\n"
             if platform == "instagram"
             else '{"text": "<게시될 본문 전체>", '
@@ -439,57 +445,40 @@ def _call_claude(prompt: str) -> dict:
     }
 
 
-# ─── Pexels 이미지 검색 (외부 의존성 0) ──────────────────────────────────
+# ─── AI 이미지 생성 (Pollinations.ai — 무료, 키 0) ──────────────────────
+# Pollinations 는 GET 요청 자체가 이미지 생성·반환. URL 을 그대로 IG 업로더에
+# 넘기면 Meta API 가 그 URL 에서 다운로드해 게시. seed 로 재현성 보장 가능.
+# Fal.ai 폴백은 다음 라운드에 추가 예정.
 
-PEXELS_SEARCH_URL = "https://api.pexels.com/v1/search"
+POLLINATIONS_BASE = "https://image.pollinations.ai/prompt"
 
 
-def _fetch_pexels_image(keyword: str) -> str | None:
-    """Pexels API v1 search → 정사각 1080 권장 이미지 URL 1개.
+def _generate_pollinations_image(prompt: str, *, width: int = 1080, height: int = 1080,
+                                 model: str = "flux", seed: int = None) -> str | None:
+    """Pollinations.ai 로 AI 이미지 URL 생성.
 
-    - PEXELS_API_KEY env 없거나 빈 문자열 → None
-    - 키워드 비어있음 → None
-    - HTTP 실패 / 결과 없음 → None (graceful, 호출자가 빈 image_url 로 처리)
-    - 상위 5개 중 랜덤 (같은 키워드 반복 시 다양성)
+    - 프롬프트 비어있음 → None
+    - URL 자체가 GET 호출 시 이미지 binary 반환 (Meta API 가 받아서 게시 가능)
+    - seed 지정 가능 (None 이면 자동 랜덤)
+    - 모델: flux (FLUX.1-schnell, 기본 추천), turbo (더 빠르지만 품질 낮음)
+    - 호출 X (URL 만 빌드) — 실제 이미지 생성은 Meta 가 다운로드 시 일어남
+      → 빠르고 비용 0, 단점은 URL 만 있을 뿐 검증 안 됨
     """
-    key = (os.environ.get("PEXELS_API_KEY") or "").strip()
-    kw = (keyword or "").strip()
-    if not key or not kw:
+    p = (prompt or "").strip()
+    if not p:
         return None
-
+    if seed is None:
+        seed = random.randint(1, 1_000_000_000)
     qs = urllib.parse.urlencode({
-        "query": kw,
-        "per_page": 5,
-        "orientation": "square",
+        "width": width,
+        "height": height,
+        "model": model,
+        "seed": seed,
+        "nologo": "true",
+        "enhance": "true",
     })
-    url = f"{PEXELS_SEARCH_URL}?{qs}"
-    req = urllib.request.Request(url, headers={
-        "Authorization": key,
-        "User-Agent": "moneyai-content-pipeline/1.0",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            body = r.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError:
-        return None
-    except urllib.error.URLError:
-        return None
-    except Exception:
-        return None
-
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-
-    photos = data.get("photos") or []
-    if not photos:
-        return None
-
-    pick = random.choice(photos)
-    src = (pick.get("src") or {}) if isinstance(pick, dict) else {}
-    # 우선순위: large (≥ 940 정사각 보장 부근) → large2x → original
-    return src.get("large") or src.get("large2x") or src.get("original") or None
+    encoded = urllib.parse.quote(p, safe="")
+    return f"{POLLINATIONS_BASE}/{encoded}?{qs}"
 
 
 # ─── draft 저장 ───────────────────────────────────────────────────────────
@@ -613,7 +602,7 @@ def run_round(platform: str, account: str, theme: str,
             "image_keyword": dummy_keyword,
         }
         if platform == "instagram" and dummy_keyword:
-            img = _fetch_pexels_image(dummy_keyword)
+            img = _generate_pollinations_image(dummy_keyword)
             if img:
                 payload["image_url"] = img
         path = _write_draft(platform, account, lang, theme, payload)
@@ -635,7 +624,7 @@ def run_round(platform: str, account: str, theme: str,
     if platform == "instagram":
         kw = result.get("image_keyword", "") or ""
         if kw:
-            img_url = _fetch_pexels_image(kw)
+            img_url = _generate_pollinations_image(kw)
             if img_url:
                 result["image_url"] = img_url
 
