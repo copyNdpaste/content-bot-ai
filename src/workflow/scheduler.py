@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-# version: scheduler_v1
+# version: scheduler_v2_random_interval
 """박재범 자율 회차 스케줄러 데몬.
 
-매 ROUTINE_INTERVAL_HOURS 시간마다 content_pipeline.py 를 호출한다.
+ROUTINE_MIN_HOURS ~ ROUTINE_MAX_HOURS 사이 **랜덤** 간격 (분 단위 정밀도) 으로
+content_pipeline.py 를 호출 — 매 회차마다 다른 시간차로 게시해서 봇 패턴 회피.
 launchd 가 RunAtLoad=true, KeepAlive=true 로 띄우는 것을 전제.
 
 env (.env 또는 launchd):
-  ROUTINE_INTERVAL_HOURS  기본 4
+  ROUTINE_MIN_HOURS       기본 2.0  (랜덤 하한)
+  ROUTINE_MAX_HOURS       기본 3.0  (랜덤 상한)
+  ROUTINE_INTERVAL_HOURS  (legacy 폴백 — 있으면 min=max 로 사용)
   ROUTINE_PLATFORMS       기본 threads,instagram,x
   ROUTINE_ACCOUNTS        기본 jp,kr
   TELEGRAM_BOT_TOKEN/CHAT_ID  알림 폴백
   SLACK_BOT_TOKEN/CHANNEL_ID  Slack 알림용 (notifier 에 위임)
 
-로그: /tmp/moneyai-content-scheduler.log
+로그: /tmp/contentbot-content-scheduler.log
 """
 import json
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -30,7 +34,7 @@ PIPELINE = os.path.join(HERE, "content_pipeline.py")
 ENV_PATH = os.path.join(REPO_ROOT, "_company", "_agents", "instagram", ".env")
 
 PYTHON_BIN = sys.executable or "/opt/homebrew/bin/python3"
-LOG_PATH = "/tmp/moneyai-content-scheduler.log"
+LOG_PATH = "/tmp/contentbot-content-scheduler.log"
 
 _STOP = False
 
@@ -98,14 +102,34 @@ def _push_telegram(message: str) -> bool:
         return False
 
 
-def _interval_seconds() -> int:
-    raw = (os.environ.get("ROUTINE_INTERVAL_HOURS") or "4").strip()
-    try:
-        hours = float(raw)
-    except ValueError:
-        hours = 4.0
-    hours = max(0.25, min(hours, 24.0))  # 15분 ~ 24h
-    return int(hours * 3600)
+def _next_interval_seconds() -> tuple:
+    """매 회차마다 호출 — ROUTINE_MIN_HOURS ~ MAX_HOURS 사이 랜덤 초.
+       반환: (seconds, human_label)  예: (8521, "2시간 22분")
+       legacy ROUTINE_INTERVAL_HOURS 가 있으면 min=max 로 처리 (옛 동작 호환)."""
+    legacy = (os.environ.get("ROUTINE_INTERVAL_HOURS") or "").strip()
+    if legacy:
+        try:
+            h = float(legacy)
+            min_h = max_h = max(0.1, min(h, 24.0))
+        except ValueError:
+            min_h, max_h = 2.0, 3.0
+    else:
+        try:
+            min_h = float((os.environ.get("ROUTINE_MIN_HOURS") or "2.0").strip())
+        except ValueError:
+            min_h = 2.0
+        try:
+            max_h = float((os.environ.get("ROUTINE_MAX_HOURS") or "3.0").strip())
+        except ValueError:
+            max_h = 3.0
+    # 안전: 0.1h(6분) ~ 24h, min<=max 보장
+    min_h = max(0.1, min(min_h, 24.0))
+    max_h = max(min_h, min(max_h, 24.0))
+    hours = random.uniform(min_h, max_h)
+    seconds = int(hours * 3600)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    return seconds, f"{h}시간 {m}분"
 
 
 def _run_pipeline_once() -> dict:
@@ -163,22 +187,26 @@ def main() -> int:
     signal.signal(signal.SIGINT, _sig_handler)
 
     _load_env_file(ENV_PATH)
-    interval = _interval_seconds()
-    _log(f"스케줄러 부팅 — interval={interval}s pipeline={PIPELINE}")
-    _push_telegram(f"🛰️ 박재범 스케줄러 부팅 (회차 주기 {interval // 60}분)")
+    _log(f"스케줄러 부팅 — pipeline={PIPELINE}")
+    _push_telegram("🛰️ 박재범 스케줄러 부팅 — 회차마다 2~3시간 사이 랜덤 간격")
 
     # 시작 즉시 1회 실행 (launchd RunAtLoad 와 자연스럽게 결합)
-    first = True
     while not _STOP:
-        if first:
-            first = False
         try:
             _run_pipeline_once()
         except Exception as e:
             _log(f"메인 루프 예외: {e}\n{traceback.format_exc()}")
             _push_telegram(f"💥 박재범 스케줄러 예외: {e}")
 
-        # 다음 회차까지 대기 (1초씩 끊어서 종료 신호 빠르게 반영)
+        if _STOP:
+            break
+
+        # 다음 회차까지 대기 — 매번 새 랜덤 간격 (봇 패턴 회피)
+        interval, label = _next_interval_seconds()
+        next_at = time.strftime("%H:%M", time.localtime(time.time() + interval))
+        _log(f"다음 회차: {label} 후 ({next_at} 예정)")
+        _push_telegram(f"⏳ 다음 회차: {label} 후 ({next_at})")
+
         slept = 0
         while slept < interval and not _STOP:
             time.sleep(1)
