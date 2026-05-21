@@ -124,24 +124,24 @@ LANDING_URL = "https://onlyfriends.tryproo.com/"
 # LLM 이 이걸 참고해서 더 자연스럽게 변형하길 기대 (그대로 베껴도 OK).
 # 핵심: 본문보다 존재감 약하게, 글 흐름 끝부분에 슬쩍.
 SOFT_MENTION_KO = [
-    "요즘 이런 친구 생기는 거 재밌음",
-    "한국에서 일본 친구 만들고 싶은 사람 있으면 OnlyFriends 써보는 것도 괜찮았음",
-    "은근 일본인 친구 만들고 싶다는 사람 많더라 OnlyFriends 같은 거 써본 적 있긴 함",
-    "그나저나 일본 친구 한 명 있으면 진짜 다르긴 함",
-    "혼자 가는 것도 좋은데 현지 친구 있으면 또 다른 맛임",
-    "(말 나온 김에 일본 친구 만드는 앱 같은 거 시도해본 사람 있어요?)",
-    "OnlyFriends 깔아둔 지 한 달 됐는데 생각보다 일본인 많음",
-    "이러다가 그냥 일본 친구 만들어야겠다 싶음",
+    "👉 OnlyFriends 에서 한일 친구 만들어보세요 https://onlyfriends.tryproo.com/",
+    "👉 일본 친구 매칭 받고 싶으면 우리 OnlyFriends 한 번 들러요 https://onlyfriends.tryproo.com/",
+    "👉 한일 친구 매칭 → OnlyFriends https://onlyfriends.tryproo.com/",
+    "👉 일본 친구 진짜 만들어보고 싶으면 → https://onlyfriends.tryproo.com/",
+    "🇰🇷🇯🇵 OnlyFriends — 한일 친구 매칭 https://onlyfriends.tryproo.com/",
+    "프로필 링크 → 한일 친구 매칭 시작 https://onlyfriends.tryproo.com/",
+    "👉 우리 서비스에서 일본 친구 매칭 받을 수 있어요 https://onlyfriends.tryproo.com/",
+    "한일 친구 진짜로 만들고 싶다 → OnlyFriends https://onlyfriends.tryproo.com/",
 ]
 SOFT_MENTION_JA = [
-    "なんか最近こういう友達できるの楽しい",
-    "韓国人の友達ほしい人、OnlyFriends 試してみるのもアリかも",
-    "意外と韓国の友達ほしい人多いよね",
-    "そういえば韓国に友達一人いるだけで全然違うよね",
-    "一人旅もいいけど現地の友達いるとまた別物",
-    "(ていうか韓国人の友達できるアプリとか試した人いる?)",
-    "OnlyFriends 入れて一ヶ月くらいだけど思ったより韓国人いる",
-    "もうこうなったら韓国人の友達作るしかないな",
+    "👉 OnlyFriends で韓国の友達できます https://onlyfriends.tryproo.com/",
+    "👉 韓国の友達ほしいなら OnlyFriends に来てね https://onlyfriends.tryproo.com/",
+    "🇰🇷🇯🇵 日韓フレンドマッチング → OnlyFriends https://onlyfriends.tryproo.com/",
+    "👉 韓国人の友達マッチングしたいなら → https://onlyfriends.tryproo.com/",
+    "プロフィールリンクから日韓友達マッチ → https://onlyfriends.tryproo.com/",
+    "👉 私たちのサービスで韓国友達できますよ https://onlyfriends.tryproo.com/",
+    "本当に韓国の友達ほしい人へ → OnlyFriends https://onlyfriends.tryproo.com/",
+    "韓国の友達 → OnlyFriends で会えます https://onlyfriends.tryproo.com/",
 ]
 
 
@@ -169,22 +169,29 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
     lang_label = {"ko": "한국어", "ja": "일본어"}.get(lang, "한국어")
     soft_mention = _pick_soft_mention(lang)
 
-    # 페르소나 — 광고 카피라이터 X, 실제 2030 여성 SNS 유저로 빙의
+    # 페르소나 — 광고 카피라이터 X. 'OnlyFriends 운영팀의 2030 여성 직원' 1인칭 빙의.
+    # 핵심: 본인이 OnlyFriends (한일 친구 매칭) 의 일부라서 자연스럽게 "우리 서비스" 라고 말함.
     persona_ko = (
         "당신은 '광고 카피라이터' 가 아닙니다.\n"
-        "당신의 역할은 — 2030 한국 여성 유저가 실제로 Threads / X / Instagram 에 올릴 법한 "
-        "**자연스러운 일상 SNS 글**을 1인칭으로 작성하는 것입니다.\n"
+        "당신의 역할은 — **OnlyFriends (한일 친구 매칭 서비스) 의 20대 후반 한국인 운영팀 멤버** 로서, "
+        "본인 일상·매칭 사례·여행 이야기를 Threads / X / Instagram 에 올리는 것입니다.\n"
         "\n"
-        "이 글은 절대로 광고처럼 보이면 안 됩니다.\n"
-        "브랜드 홍보보다 '진짜 사람 느낌' 이 우선입니다.\n"
+        "📌 핵심 정체성:\n"
+        "  - 본인 계정 = OnlyFriends 공식 (jp 계정은 일본팀 / kr 계정은 한국팀)\n"
+        "  - 일반 사용자가 추천하는 톤 X — '우리 서비스에 이런 일 있었음' 1인칭 운영자 톤 O\n"
+        "  - 매일 매칭 사례·후기·여행기·일상이 자연스럽게 소재가 됨\n"
+        "  - 광고체 X, 친구한테 회사 얘기 하는 느낌\n"
     )
     persona_ja = (
         "あなたは「広告コピーライター」ではありません。\n"
-        "あなたの役割は — 20〜30代の日本人女性ユーザーが実際に Threads / X / Instagram に "
-        "投稿しそうな **自然な日常 SNS 投稿** を一人称で書くことです。\n"
+        "あなたの役割は — **OnlyFriends (日韓フレンドマッチング) の 20代後半・日本人運営チームメンバー** "
+        "として、自分の日常・マッチング事例・旅行話を Threads / X / Instagram に投稿することです。\n"
         "\n"
-        "この投稿は絶対に広告っぽく見えてはいけません。\n"
-        "ブランド宣伝より「本物の人感」が最優先です。\n"
+        "📌 核心アイデンティティ:\n"
+        "  - 自分のアカウント = OnlyFriends 公式 (jp = 日本チーム / kr = 韓国チーム)\n"
+        "  - 一般ユーザーが推薦するトーン X — '私たちのサービスにこんな話があったよ' 一人称運営者トーン O\n"
+        "  - 毎日のマッチング事例・口コミ・旅行記・日常が自然に話題になる\n"
+        "  - 広告調 X、友達に会社の話する感じ\n"
     )
 
     # 핵심 목표 — 감정 유도 (서비스 소개 X)
@@ -275,15 +282,30 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
             f"Instagram — 감성 일상 느낌. 사진 설명 같은 톤. 정보 전달형 금지. "
             f"본문 {limit}자 이내. 해시태그 5~10개 (도배 X, 자연스럽게). "
             f"본문 분위기에 어울리는 **AI 이미지 생성용 영문 프롬프트** 도 image_keyword 에 함께 출력. "
-            f"형식: 사람·장면·조명·분위기·스타일 포함 15~30 단어, 끝에 'no text, no watermark, "
-            f"instagram aesthetic, candid' 같은 톤 가이드 첨부. "
-            f"예시:\n"
-            f"  - 'two friends, korean and japanese girls in their 20s, cozy tokyo cafe, "
-            f"soft afternoon light, candid laughing moment, film grain, no text, no watermark'\n"
+            f"\n"
+            f"🚨 매우 중요 — 사람 얼굴·손 생성 절대 금지:\n"
+            f"  AI 가 사람 정면·클로즈업 만들면 80% 확률로 괴물처럼 망가짐. 반드시 다음 컨셉 중 1개로:\n"
+            f"  ① flatlay (음식·화장품·책·카메라·꽃 등 위에서 본 사물 배치)\n"
+            f"  ② 뒷모습·실루엣·일부만 (걷는 뒷모습, 손 그림자, 발만)\n"
+            f"  ③ 풍경·인테리어 (카페 내부, 거리, 호텔, 서점) — 사람 없이\n"
+            f"  ④ 사물 클로즈업 (커피 한 잔, 책 페이지, 노트북, 폰 화면)\n"
+            f"\n"
+            f"형식: 영문 15~30 단어 + 끝에 반드시 'no people visible, no faces, no hands, "
+            f"film grain, 35mm, instagram aesthetic, no text, no watermark' 톤 가이드 첨부. "
+            f"\n"
+            f"좋은 예시:\n"
             f"  - 'aesthetic flatlay, k-beauty skincare products and matcha latte on marble "
-            f"table, soft morning light, instagram aesthetic, no text'\n"
-            f"  - 'solo travel girl walking through shinjuku at night, neon lights reflecting, "
-            f"35mm film look, dreamy mood, no text, no watermark'"
+            f"table, dried flowers, soft morning light, film grain, 35mm, instagram aesthetic, "
+            f"no people, no text, no watermark'\n"
+            f"  - 'cozy tokyo cafe interior, empty wooden table near window, hanging plants, "
+            f"warm afternoon light, no people visible, film grain, instagram aesthetic, no text'\n"
+            f"  - 'shinjuku alley at night, neon signs reflecting on wet pavement, rain, "
+            f"cinematic, no people visible, 35mm film, no text, no watermark'\n"
+            f"  - 'close-up of latte art and croissant on rustic wooden table, side window light, "
+            f"film grain, instagram aesthetic, no people, no text, no watermark'\n"
+            f"\n"
+            f"❌ 절대 금지 키워드: 'portrait', 'close-up face', 'two girls smiling', "
+            f"'holding hands', 'eye contact', 'looking at camera', 'selfie', 'group of friends'"
         ),
     }.get(platform, "")
 
@@ -461,11 +483,19 @@ def _generate_pollinations_image(prompt: str, *, width: int = 1080, height: int 
     - seed 지정 가능 (None 이면 자동 랜덤)
     - 모델: flux (FLUX.1-schnell, 기본 추천), turbo (더 빠르지만 품질 낮음)
     - 호출 X (URL 만 빌드) — 실제 이미지 생성은 Meta 가 다운로드 시 일어남
-      → 빠르고 비용 0, 단점은 URL 만 있을 뿐 검증 안 됨
+    - 프롬프트에 사람 회피·negative 가이드 자동 첨부 (FLUX 무료가 사람 얼굴 망침 회피)
     """
     p = (prompt or "").strip()
     if not p:
         return None
+    # 자동 safety suffix — LLM 가이드를 안 따랐을 경우 대비 이중 안전망
+    safety_suffix = (
+        ", no people visible, no faces, no hands, no humans, "
+        "no portrait, no close-up of person, film grain, 35mm, "
+        "instagram aesthetic, no text, no watermark, no logo"
+    )
+    if "no people" not in p.lower() and "no faces" not in p.lower():
+        p = p + safety_suffix
     if seed is None:
         seed = random.randint(1, 1_000_000_000)
     qs = urllib.parse.urlencode({
