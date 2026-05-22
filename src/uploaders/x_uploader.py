@@ -65,6 +65,7 @@ X Developer Portal — User OAuth 2.0 토큰 발급 6단계 (요약)
    이후 token_manager.py --bootstrap → tokens.json 에 통합 + 자동 갱신.
 """
 import argparse
+import base64
 import datetime as dt
 import json
 import os
@@ -77,12 +78,14 @@ import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DRAFTS_DIR = os.path.join(HERE, "drafts")
-TOKENS_PATH = os.path.join(HERE, "tokens.json")
-TOKEN_MANAGER_PATH = os.path.join(HERE, "token_manager.py")
+REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+DRAFTS_DIR = os.path.join(REPO_ROOT, "drafts")
+TOKENS_PATH = os.path.join(REPO_ROOT, "src", "auth", "tokens.json")
+TOKEN_MANAGER_PATH = os.path.join(REPO_ROOT, "src", "auth", "token_manager.py")
 
 API_TWEETS = "https://api.x.com/2/tweets"
 API_OAUTH_TOKEN = "https://api.x.com/2/oauth2/token"
+API_MEDIA_UPLOAD_V2 = "https://api.x.com/2/media/upload"
 UPLOAD_V1 = "https://upload.twitter.com/1.1/media/upload.json"
 
 # X access token 은 2시간 — 30분 이하면 자동 갱신.
@@ -269,7 +272,8 @@ def _seconds_until(iso: str):
     try:
         s = iso[:-1] if iso.endswith("Z") else iso
         d = dt.datetime.fromisoformat(s)
-        return (d - dt.datetime.utcnow()).total_seconds()
+        now = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+        return (d - now).total_seconds()
     except Exception:
         return None
 
@@ -350,10 +354,10 @@ def _resolve_credentials(account: str):
                             "access_token": new_at,
                             "refresh_token": new_rt,
                             "expires_at": (
-                                dt.datetime.utcnow()
+                                dt.datetime.now(dt.UTC).replace(tzinfo=None)
                                 + dt.timedelta(seconds=exp_in)
                             ).replace(microsecond=0).isoformat() + "Z",
-                            "refreshed_at": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+                            "refreshed_at": dt.datetime.now(dt.UTC).replace(tzinfo=None).replace(microsecond=0).isoformat() + "Z",
                         }
                         tokens.setdefault("x", {})[account] = info
                         _save_tokens(tokens)
@@ -368,7 +372,7 @@ def _resolve_credentials(account: str):
     return "", "", "none"
 
 
-# ─── 미디어 업로드 (v1.1 endpoints) ─────────────────────────────────────────
+# ─── 미디어 업로드 ─────────────────────────────────────────────────────────
 
 def _guess_content_type(url: str, media_type: str) -> tuple:
     """returns (content_type, filename)."""
@@ -385,17 +389,16 @@ def _guess_content_type(url: str, media_type: str) -> tuple:
 
 
 def _upload_image(media_bytes: bytes, content_type: str, filename: str, bearer: str) -> str:
-    """v1.1 simple upload (이미지 ≤ 5MB)."""
-    resp = _multipart_post(
-        UPLOAD_V1,
-        bearer=bearer,
-        fields={},
-        file_field="media",
-        file_bytes=media_bytes,
-        filename=filename,
-        content_type=content_type,
-    )
-    mid = resp.get("media_id_string") or str(resp.get("media_id") or "")
+    """X API v2 media upload for OAuth 2.0 user tokens."""
+    payload = {
+        "media": base64.b64encode(media_bytes).decode("ascii"),
+        "media_category": "tweet_image",
+        "media_type": content_type,
+        "shared": False,
+    }
+    resp = _http_json_body(API_MEDIA_UPLOAD_V2, body=payload, bearer=bearer, method="POST")
+    data = resp.get("data") or {}
+    mid = str(data.get("id") or data.get("media_id") or data.get("media_key") or "")
     if not mid:
         raise RuntimeError(f"image upload 응답에 media_id 없음: {resp}")
     return mid
@@ -578,9 +581,9 @@ def main():
                         "access_token": access_token,
                         "refresh_token": new_rt,
                         "expires_at": (
-                            dt.datetime.utcnow() + dt.timedelta(seconds=exp_in)
+                            dt.datetime.now(dt.UTC).replace(tzinfo=None) + dt.timedelta(seconds=exp_in)
                         ).replace(microsecond=0).isoformat() + "Z",
-                        "refreshed_at": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+                        "refreshed_at": dt.datetime.now(dt.UTC).replace(tzinfo=None).replace(microsecond=0).isoformat() + "Z",
                     })
                     _save_tokens(tokens)
                     refreshed = True

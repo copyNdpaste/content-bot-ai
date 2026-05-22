@@ -160,7 +160,7 @@ def _slack_post(method: str, payload: dict, bot_token: str) -> dict:
 
 
 def _build_blocks(meta: dict, body: str, platform: str, account: str,
-                  draft_id: str) -> list:
+                  draft_id: str, mode: str = "approval") -> list:
     flag = _country_flag(account)
     pemoji = _platform_emoji(platform)
     header_text = f"{flag} {pemoji} {platform.upper()} · @{account}"
@@ -205,32 +205,53 @@ def _build_blocks(meta: dict, body: str, platform: str, account: str,
             "elements": [{"type": "mrkdwn", "text": " · ".join(meta_bits)}],
         })
 
-    blocks.append({
-        "type": "actions",
-        "block_id": f"approval_{draft_id}",
-        "elements": [
-            {
-                "type": "button",
-                "style": "primary",
-                "text": {"type": "plain_text", "text": "✅ 승인 → 업로드", "emoji": True},
-                "action_id": f"approve_{draft_id}",
-                "value": draft_id,
+    if mode == "manual":
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "*𝕏 수동 업로드 필요*\n"
+                    "X API 크레딧 문제로 자동 업로드하지 않습니다. "
+                    "위 문구와 이미지를 X에 직접 올려주세요."
+                ),
             },
-            {
-                "type": "button",
-                "style": "danger",
-                "text": {"type": "plain_text", "text": "❌ 거절", "emoji": True},
-                "action_id": f"reject_{draft_id}",
-                "value": draft_id,
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "📝 수정 요청", "emoji": True},
-                "action_id": f"edit_{draft_id}",
-                "value": draft_id,
-            },
-        ],
-    })
+        })
+    elif mode == "auto":
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": "🚀 Slack 알림 후 자동 업로드를 진행합니다.",
+            }],
+        })
+    else:
+        blocks.append({
+            "type": "actions",
+            "block_id": f"approval_{draft_id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "text": {"type": "plain_text", "text": "✅ 승인 → 업로드", "emoji": True},
+                    "action_id": f"approve_{draft_id}",
+                    "value": draft_id,
+                },
+                {
+                    "type": "button",
+                    "style": "danger",
+                    "text": {"type": "plain_text", "text": "❌ 거절", "emoji": True},
+                    "action_id": f"reject_{draft_id}",
+                    "value": draft_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📝 수정 요청", "emoji": True},
+                    "action_id": f"edit_{draft_id}",
+                    "value": draft_id,
+                },
+            ],
+        })
 
     return blocks
 
@@ -244,6 +265,9 @@ def main():
                     choices=["threads", "instagram", "x"],
                     help="플랫폼")
     ap.add_argument("--account", required=True, help="계정 (jp/kr/...)")
+    ap.add_argument("--mode", default="approval",
+                    choices=["approval", "auto", "manual"],
+                    help="approval=버튼 승인, auto=자동 업로드 안내, manual=수동 업로드 안내")
     args = ap.parse_args()
 
     draft_path = os.path.abspath(args.draft_path)
@@ -271,7 +295,7 @@ def main():
         }, ensure_ascii=False))
         return 0
 
-    blocks = _build_blocks(meta, body, args.platform, args.account, draft_id)
+    blocks = _build_blocks(meta, body, args.platform, args.account, draft_id, args.mode)
     fallback_text = f"[{args.platform}/{args.account}] {_truncate(body, 120)}"
 
     try:
@@ -300,7 +324,12 @@ def main():
     meta["slack_channel"] = channel
     meta["slack_platform"] = args.platform
     meta["slack_account"] = args.account
-    meta.setdefault("status", "awaiting_approval")
+    if args.mode == "auto":
+        meta["status"] = "auto_uploading"
+    elif args.mode == "manual":
+        meta["status"] = "manual_upload_required"
+    else:
+        meta.setdefault("status", "awaiting_approval")
     try:
         _write_draft(draft_path, meta, body)
     except Exception as e:

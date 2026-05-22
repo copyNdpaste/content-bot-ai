@@ -51,9 +51,10 @@ import urllib.request
 import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DRAFTS_DIR = os.path.join(HERE, "drafts")
-TOKENS_PATH = os.path.join(HERE, "tokens.json")
-TOKEN_MANAGER_PATH = os.path.join(HERE, "token_manager.py")
+REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+DRAFTS_DIR = os.path.join(REPO_ROOT, "drafts")
+TOKENS_PATH = os.path.join(REPO_ROOT, "src", "auth", "tokens.json")
+TOKEN_MANAGER_PATH = os.path.join(REPO_ROOT, "src", "auth", "token_manager.py")
 THREADS_API_BASE = "https://graph.threads.net/v1.0"
 
 REFRESH_THRESHOLD_DAYS = 7
@@ -363,7 +364,8 @@ def _days_until(iso: str):
     try:
         s = iso[:-1] if iso.endswith("Z") else iso
         d = dt.datetime.fromisoformat(s)
-        return (d - dt.datetime.utcnow()).total_seconds() / 86400.0
+        now = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+        return (d - now).total_seconds() / 86400.0
     except Exception:
         return None
 

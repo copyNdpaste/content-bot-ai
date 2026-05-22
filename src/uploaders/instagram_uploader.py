@@ -43,23 +43,28 @@
 LLM 호출 0회.
 """
 import argparse
+import datetime as dt
 import json
 import os
 import subprocess
 import sys
 import time
-import datetime as dt
 import urllib.parse
 import urllib.request
 import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DRAFTS_DIR = os.path.join(HERE, "drafts")
-TOKENS_PATH = os.path.join(HERE, "tokens.json")
-TOKEN_MANAGER_PATH = os.path.join(HERE, "token_manager.py")
-IG_API_BASE = "https://graph.facebook.com/v18.0"
+REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+DRAFTS_DIR = os.path.join(REPO_ROOT, "drafts")
+TOKENS_PATH = os.path.join(REPO_ROOT, "src", "auth", "tokens.json")
+TOKEN_MANAGER_PATH = os.path.join(REPO_ROOT, "src", "auth", "token_manager.py")
+RUNTIME_DIR = os.path.join(REPO_ROOT, ".runtime")
+COOLDOWNS_PATH = os.path.join(RUNTIME_DIR, "instagram_cooldowns.json")
+# Instagram Business Login 토큰(IGAA...)은 graph.instagram.com 엔드포인트를 써야 한다.
+IG_API_BASE = "https://graph.instagram.com/v18.0"
 
 REFRESH_THRESHOLD_DAYS = 7
+ACTION_BLOCK_COOLDOWN_HOURS = 24
 
 
 def _ensure_drafts_dir():
@@ -150,6 +155,97 @@ def _http_get(url: str) -> dict:
         raise RuntimeError(f"IG API HTTP {e.code}: {body[:400]}")
     except urllib.error.URLError as e:
         raise RuntimeError(f"IG API 네트워크 실패: {e.reason}")
+
+
+def _extract_error_json(message: str) -> dict:
+    """RuntimeError 문자열에 포함된 Graph API JSON body 를 best-effort 로 추출."""
+    if not message:
+        return {}
+    start = message.find("{")
+    if start < 0:
+        return {}
+    try:
+        return json.loads(message[start:])
+    except Exception:
+        return {}
+
+
+def _is_action_block_error(message: str) -> bool:
+    data = _extract_error_json(message)
+    err = data.get("error") or {}
+    code = err.get("code")
+    subcode = err.get("error_subcode")
+    user_title = str(err.get("error_user_title") or "")
+    user_msg = str(err.get("error_user_msg") or "")
+    text = " ".join([message, user_title, user_msg])
+    return (
+        code == 4
+        or subcode == 2207051
+        or "Application request limit reached" in text
+        or "행동이 차단" in text
+    )
+
+
+def _load_cooldowns() -> dict:
+    if not os.path.isfile(COOLDOWNS_PATH):
+        return {}
+    try:
+        with open(COOLDOWNS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _save_cooldowns(data: dict) -> None:
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    tmp = COOLDOWNS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp, COOLDOWNS_PATH)
+
+
+def _parse_utc(iso: str):
+    if not iso:
+        return None
+    try:
+        s = iso[:-1] if iso.endswith("Z") else iso
+        return dt.datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.UTC).replace(tzinfo=None)
+
+
+def _cooldown_remaining(account: str) -> tuple[bool, str]:
+    info = (_load_cooldowns().get(account) or {})
+    until = _parse_utc(info.get("until", ""))
+    if not until:
+        return False, ""
+    remaining = (until - _utc_now()).total_seconds()
+    if remaining <= 0:
+        return False, ""
+    hours = max(1, int((remaining + 3599) // 3600))
+    return True, (
+        f"Instagram 계정 [{account}]은 Meta 행동 제한으로 쿨다운 중입니다. "
+        f"약 {hours}시간 후 재시도하세요. until={info.get('until')}"
+    )
+
+
+def _set_action_block_cooldown(account: str, raw_error: str) -> str:
+    until = (
+        _utc_now() + dt.timedelta(hours=ACTION_BLOCK_COOLDOWN_HOURS)
+    ).replace(microsecond=0).isoformat() + "Z"
+    data = _load_cooldowns()
+    data[account] = {
+        "until": until,
+        "reason": "instagram_action_block",
+        "last_error": raw_error[:1000],
+        "updated_at": _utc_now().replace(microsecond=0).isoformat() + "Z",
+    }
+    _save_cooldowns(data)
+    return until
 
 
 def _poll_container_status(container_id: str, access_token: str,
@@ -296,9 +392,11 @@ def _days_until(iso: str):
     if not iso:
         return None
     try:
-        s = iso[:-1] if iso.endswith("Z") else iso
-        d = dt.datetime.fromisoformat(s)
-        return (d - dt.datetime.utcnow()).total_seconds() / 86400.0
+        d = _parse_utc(iso)
+        if not d:
+            return None
+        now = _utc_now()
+        return (d - now).total_seconds() / 86400.0
     except Exception:
         return None
 
@@ -392,6 +490,14 @@ def main():
         }, ensure_ascii=False))
         return 0
 
+    blocked, cooldown_msg = _cooldown_remaining(account)
+    if blocked:
+        sys.stderr.write(f"❌ Instagram 게시 보류 [{account}]: {cooldown_msg}\n")
+        info = (_load_cooldowns().get(account) or {})
+        if info.get("until"):
+            sys.stderr.write(f"COOLDOWN_UNTIL={info['until']}\n")
+        return 1
+
     try:
         result = _real_post(args.caption, media_urls, carousel_types,
                             media_type, access_token, ig_user_id)
@@ -404,6 +510,14 @@ def main():
                     result = _real_post(args.caption, media_urls, carousel_types,
                                         media_type, access_token, ig_user_id)
                 except Exception as e2:
+                    if _is_action_block_error(str(e2)):
+                        until = _set_action_block_cooldown(account, str(e2))
+                        sys.stderr.write(
+                            f"❌ Instagram 게시 실패 [{account}]: Meta 행동 제한 감지. "
+                            f"{until}까지 자동 재시도를 보류합니다.\n{e2}\n"
+                        )
+                        sys.stderr.write(f"COOLDOWN_UNTIL={until}\n")
+                        return 1
                     sys.stderr.write(f"❌ Instagram 게시 실패 [{account}]: {e2}\n")
                     sys.stderr.write("   → python3 token_manager.py --bootstrap 으로 재발급 권장\n")
                     return 1
@@ -411,6 +525,14 @@ def main():
                 sys.stderr.write(f"❌ Instagram 게시 실패 [{account}]: {e}\n")
                 return 1
         else:
+            if _is_action_block_error(msg):
+                until = _set_action_block_cooldown(account, msg)
+                sys.stderr.write(
+                    f"❌ Instagram 게시 실패 [{account}]: Meta 행동 제한 감지. "
+                    f"{until}까지 자동 재시도를 보류합니다.\n{e}\n"
+                )
+                sys.stderr.write(f"COOLDOWN_UNTIL={until}\n")
+                return 1
             sys.stderr.write(f"❌ Instagram 게시 실패 [{account}]: {e}\n")
             return 1
 

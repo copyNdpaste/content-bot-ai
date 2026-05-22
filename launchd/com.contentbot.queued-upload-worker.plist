@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.contentbot.queued-upload-worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/hoony/projects/content-bot-ai/.venv/bin/python3</string>
+        <string>/Users/hoony/projects/content-bot-ai/src/workflow/queued_upload_worker.py</string>
+        <string>--interval</string>
+        <string>300</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hoony/projects/content-bot-ai</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/contentbot-queued-upload-worker.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/contentbot-queued-upload-worker.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/hoony/.nvm/versions/node/v22.22.2/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

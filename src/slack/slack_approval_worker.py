@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -44,12 +45,38 @@ except ImportError:
     sys.exit(2)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DRAFTS_DIR = os.path.join(HERE, "drafts")
+REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+DRAFTS_DIR = os.path.join(REPO_ROOT, "drafts")
 REJECTED_DIR = os.path.join(DRAFTS_DIR, "rejected")
+ENV_PATH = os.path.join(REPO_ROOT, ".env")
 
-THREADS_UPLOADER = os.path.join(HERE, "threads_uploader.py")
-INSTAGRAM_UPLOADER = os.path.join(HERE, "instagram_uploader.py")
-X_UPLOADER = os.path.join(HERE, "x_uploader.py")  # 병렬 에이전트가 생성 중
+THREADS_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "threads_uploader.py")
+INSTAGRAM_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "instagram_uploader.py")
+X_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "x_uploader.py")
+LANDING_URL = "https://onlyfriends.tryproo.com/"
+
+
+def _load_env_file(path: str) -> None:
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip()
+                if v and not (v.startswith('"') or v.startswith("'")):
+                    hash_idx = v.find("#")
+                    if hash_idx >= 0:
+                        v = v[:hash_idx].rstrip()
+                v = v.strip('"').strip("'")
+                if k and not os.environ.get(k):
+                    os.environ[k] = v
+    except Exception as e:
+        sys.stderr.write(f"⚠️ .env 로드 실패: {e}\n")
 
 
 # ─── frontmatter 파싱/저장 ────────────────────────────────────────────────
@@ -80,6 +107,32 @@ def write_draft(path: str, meta: dict, body: str):
     out = "\n".join(lines) + "\n\n" + (body or "").lstrip("\n")
     with open(path, "w", encoding="utf-8") as f:
         f.write(out)
+
+
+def _required_landing_cta(account: str, lang: str = "") -> str:
+    if account.lower() == "jp" or lang == "ja":
+        return f"👉 韓国の友達を本当に作ってみたいなら → {LANDING_URL}"
+    return f"👉 일본 친구 진짜 만들어보고 싶으면 → {LANDING_URL}"
+
+
+def _ensure_required_landing_cta(meta: dict, body: str) -> str:
+    text = (body or "").rstrip()
+    if not text:
+        return text
+    account = meta.get("slack_account") or meta.get("account") or "kr"
+    lang = meta.get("lang") or ""
+    cta = _required_landing_cta(account, lang)
+    text = __import__("re").sub(
+        r"\n*👉\s*(?:일본|한국|韓国|日本)[^\n]*tryproo\.com/?\s*$",
+        "",
+        text,
+    ).rstrip()
+    text = __import__("re").sub(
+        r"\n*https://onlyfriends\.tryproo\.com/?\s*$",
+        "",
+        text,
+    ).rstrip()
+    return f"{text}\n\n{cta}"
 
 
 # ─── action_id → draft path 매핑 ──────────────────────────────────────────
@@ -117,6 +170,7 @@ def _run_uploader(platform: str, account: str, meta: dict, body: str) -> dict:
         cmd = [py, THREADS_UPLOADER, "--text", body, "--account", account]
         if meta.get("image_url"):
             cmd += ["--image-url", meta["image_url"]]
+            cmd += ["--media-type", "image"]
         if meta.get("reply_control"):
             cmd += ["--reply-control", meta["reply_control"]]
     elif platform == "instagram":
@@ -135,12 +189,19 @@ def _run_uploader(platform: str, account: str, meta: dict, body: str) -> dict:
                     "error": "x_uploader.py 미구현 (병렬 에이전트 작업 중)"}
         cmd = [py, X_UPLOADER, "--text", body, "--account", account]
         if meta.get("image_url"):
-            cmd += ["--image-url", meta["image_url"]]
+            cmd += ["--media-url", meta["image_url"], "--media-type", "image"]
     else:
         return {"ok": False, "error": f"알 수 없는 플랫폼: {platform}"}
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            cwd=REPO_ROOT,
+            env=os.environ.copy(),
+        )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "uploader 타임아웃 (180s)"}
     except Exception as e:
@@ -159,14 +220,21 @@ def _run_uploader(platform: str, account: str, meta: dict, body: str) -> dict:
         parsed = json.loads(last)
         permalink = parsed.get("permalink", "") or ""
         status = parsed.get("status", "") or ""
+        post_id = (
+            parsed.get("media_id")
+            or parsed.get("thread_id")
+            or parsed.get("tweet_id")
+            or ""
+        )
     except Exception:
+        post_id = ""
         pass
 
     if status == "drafted":
         return {"ok": False,
                 "error": "uploader 가 draft 모드 — 토큰 없음 (token_manager.py --status 확인)"}
 
-    return {"ok": True, "permalink": permalink, "raw": out[-400:]}
+    return {"ok": True, "permalink": permalink, "post_id": post_id, "raw": out[-400:]}
 
 
 # ─── Slack 메시지 갱신 ─────────────────────────────────────────────────────
@@ -206,6 +274,14 @@ def _retry_blocks(draft_id: str, error: str) -> list:
               "action_id": f"reject_{draft_id}", "value": draft_id},
          ]},
     ]
+
+
+def _cooldown_until_from_error(error: str) -> str:
+    m = re.search(r"COOLDOWN_UNTIL=([0-9T:\-]+Z)", error or "")
+    if m:
+        return m.group(1)
+    m = re.search(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z)", error or "")
+    return m.group(1) if m else ""
 
 
 def _approval_blocks_for_edit(draft_id: str, preview: str) -> list:
@@ -329,6 +405,27 @@ def _handle_approve(web: WebClient, draft_id: str, channel: str, ts: str):
     meta, body = parse_draft(path)
     platform = meta.get("slack_platform") or meta.get("target") or "threads"
     account = meta.get("slack_account") or meta.get("account") or "default"
+    if platform == "x":
+        meta["status"] = "manual_upload_required"
+        try:
+            write_draft(path, meta, body)
+        except Exception:
+            pass
+        _update_message(
+            web, channel, ts,
+            "𝕏 수동 업로드 필요",
+            _result_blocks(
+                "𝕏 수동 업로드 필요",
+                "X API 크레딧 문제로 자동 업로드하지 않습니다. Slack의 문구와 이미지를 X에 직접 올려주세요.",
+            ),
+        )
+        return
+
+    body = _ensure_required_landing_cta(meta, body)
+    try:
+        write_draft(path, meta, body)
+    except Exception:
+        pass
 
     _update_message(web, channel, ts, "⏳ 업로드 중...",
                     _result_blocks("⏳ 업로드 중...",
@@ -341,6 +438,8 @@ def _handle_approve(web: WebClient, draft_id: str, channel: str, ts: str):
         meta["posted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         if permalink and permalink != "(permalink 없음)":
             meta["permalink"] = permalink
+        if result.get("post_id"):
+            meta["platform_post_id"] = result["post_id"]
         try:
             write_draft(path, meta, body)
         except Exception:
@@ -355,6 +454,26 @@ def _handle_approve(web: WebClient, draft_id: str, channel: str, ts: str):
         )
     else:
         err = result.get("error", "unknown")
+        cooldown_until = _cooldown_until_from_error(err)
+        if cooldown_until:
+            meta["status"] = "queued"
+            meta["queued_until"] = cooldown_until
+            meta["queued_reason"] = "cooldown"
+            meta["last_error"] = err[:500].replace("\n", " ")
+            meta["queued_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            try:
+                write_draft(path, meta, body)
+            except Exception:
+                pass
+            _update_message(
+                web, channel, ts,
+                f"⏳ 쿨다운 큐 등록: {cooldown_until}",
+                _result_blocks(
+                    "⏳ 쿨다운 큐 등록",
+                    f"`{platform}` / `{account}`\n{cooldown_until} 이후 자동 재시도합니다.",
+                ),
+            )
+            return
         _update_message(web, channel, ts, f"❌ 업로드 실패: {err}",
                         _retry_blocks(draft_id, err))
 
@@ -446,14 +565,14 @@ def on_request(client: SocketModeClient, req: SocketModeRequest):
 
 
 def main():
+    _load_env_file(ENV_PATH)
     bot_token = (os.environ.get("SLACK_BOT_TOKEN") or "").strip()
     app_token = (os.environ.get("SLACK_APP_TOKEN") or "").strip()
     if not bot_token or not app_token:
         sys.stderr.write(
             "❌ SLACK_BOT_TOKEN / SLACK_APP_TOKEN 미설정.\n"
-            "   _company/_agents/instagram/.env 에 값을 채운 후\n"
+            "   content-bot-ai/.env 에 값을 채운 후\n"
             "   launchctl 로 워커를 재시작하세요.\n"
-            "   가이드: assets/tool-seeds/instagram/slack_setup.md\n"
         )
         return 2
 
