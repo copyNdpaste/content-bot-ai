@@ -32,6 +32,11 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from src.domain import scheduling as scheduling_rules  # noqa: E402
+
 PACK_GENERATOR = os.path.join(REPO_ROOT, "scripts", "generate_platform_pack.py")
 ENV_PATH = os.path.join(REPO_ROOT, ".env")
 ENV_PATH_LEGACY = os.path.join(REPO_ROOT, "_company", "_agents", "instagram", ".env")
@@ -119,26 +124,11 @@ def _next_interval_seconds() -> tuple:
 
 
 def _interval_bounds() -> tuple[float, float]:
-    legacy = (os.environ.get("ROUTINE_INTERVAL_HOURS") or "").strip()
-    if legacy:
-        try:
-            h = float(legacy)
-            min_h = max_h = h
-        except ValueError:
-            min_h, max_h = 2.0, 3.0
-    else:
-        try:
-            min_h = float((os.environ.get("ROUTINE_MIN_HOURS") or "2.0").strip())
-        except ValueError:
-            min_h = 2.0
-        try:
-            max_h = float((os.environ.get("ROUTINE_MAX_HOURS") or "3.0").strip())
-        except ValueError:
-            max_h = 3.0
-    # 안전: 자동 게시는 최소 2시간 간격으로 고정한다.
-    min_h = max(2.0, min(min_h, 24.0))
-    max_h = max(min_h, min(max_h, 24.0))
-    return min_h, max_h
+    return scheduling_rules.interval_bounds(
+        legacy_hours=os.environ.get("ROUTINE_INTERVAL_HOURS") or "",
+        min_hours=os.environ.get("ROUTINE_MIN_HOURS") or "2.0",
+        max_hours=os.environ.get("ROUTINE_MAX_HOURS") or "3.0",
+    )
 
 
 def _read_state() -> dict:
@@ -167,13 +157,12 @@ def _write_state(patch: dict) -> None:
 
 def _seconds_until_min_interval_elapsed() -> int:
     last_started = _read_state().get("last_run_started_at")
-    try:
-        last_started = int(last_started)
-    except Exception:
-        return 0
     min_h, _max_h = _interval_bounds()
-    remaining = int((last_started + min_h * 3600) - time.time())
-    return max(0, remaining)
+    return scheduling_rules.seconds_until_min_interval_elapsed(
+        now=time.time(),
+        last_started_at=last_started,
+        min_hours=min_h,
+    )
 
 
 def _sleep_interruptibly(seconds: int) -> None:

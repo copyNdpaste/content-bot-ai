@@ -39,6 +39,12 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 # content-bot-ai 신규 레이아웃: src/workflow/ → 두 단계 위가 repo root
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from src.application import draft_documents  # noqa: E402
+from src.domain import content_rules  # noqa: E402
+
 SLACK_NOTIFIER = os.path.join(REPO_ROOT, "src", "slack", "slack_notifier.py")
 THREADS_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "threads_uploader.py")
 INSTAGRAM_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "instagram_uploader.py")
@@ -53,11 +59,7 @@ CLAUDE_TIMEOUT_SEC = 180
 CODEX_TIMEOUT_SEC = 180
 PYTHON_BIN = sys.executable or "/opt/homebrew/bin/python3"
 
-PLATFORM_LIMITS = {
-    "x": 280,
-    "threads": 500,
-    "instagram": 2200,  # 캡션
-}
+PLATFORM_LIMITS = content_rules.PLATFORM_LIMITS
 
 STYLE_CONFIG_PATH = os.path.join(REPO_ROOT, "config", "content_styles.json")
 _STYLE_CACHE = None
@@ -536,8 +538,8 @@ def _attach_style_meta(payload: dict, ctx: dict) -> None:
 
 # ─── 본문 생성 LLM 호출 ──────────────────────────────────────────────────
 
-BRAND_NAME = "OnlyFriends"
-LANDING_URL = "https://onlyfriends.tryproo.com/"
+BRAND_NAME = content_rules.BRAND_NAME
+LANDING_URL = content_rules.LANDING_URL
 
 # 자연스러운 brand mention 예시 — "광고 카피" 가 아니라 "친구한테 말하듯" 톤.
 # LLM 이 이걸 참고해서 더 자연스럽게 변형하길 기대 (그대로 베껴도 OK).
@@ -566,21 +568,11 @@ SOFT_MENTION_JA = [
 
 def _required_landing_cta(account: str, lang: str) -> str:
     """계정별 필수 랜딩 CTA. 최종 본문 끝에 코드로 강제한다."""
-    if account.lower() == "jp" or lang == "ja":
-        return f"👉 韓国の友達を本当に作ってみたいなら → {LANDING_URL}"
-    return f"👉 일본 친구 진짜 만들어보고 싶으면 → {LANDING_URL}"
+    return content_rules.required_landing_cta(account, lang)
 
 
 def _ensure_required_landing_cta(payload: dict, account: str, lang: str) -> None:
-    if not isinstance(payload, dict):
-        return
-    text = str(payload.get("text") or "").rstrip()
-    if not text:
-        return
-    cta = _required_landing_cta(account, lang)
-    text = re.sub(r"\n*👉\s*(?:일본|한국|韓国|日本)[^\n]*tryproo\.com/?\s*$", "", text).rstrip()
-    text = re.sub(r"\n*https://onlyfriends\.tryproo\.com/?\s*$", "", text).rstrip()
-    payload["text"] = f"{text}\n\n{cta}"
+    content_rules.enforce_payload_cta(payload, account, lang)
 
 
 def _pick_soft_mention(lang: str) -> str:
@@ -1181,10 +1173,7 @@ def _now_stamp() -> str:
 
 def _escape_fm(v) -> str:
     """frontmatter 안전 직렬화 (단일 라인)."""
-    if isinstance(v, list):
-        return ", ".join(str(x).replace("\n", " ") for x in v)
-    s = str(v).replace("\r", " ").replace("\n", " ").strip()
-    return s
+    return draft_documents.escape_frontmatter_value(v)
 
 
 def _write_draft(platform: str, account: str, lang: str, theme: str,
@@ -1194,49 +1183,19 @@ def _write_draft(platform: str, account: str, lang: str, theme: str,
     filename = f"{platform}-{ts}-{account}.md"
     path = os.path.join(DRAFTS_DIR, filename)
 
-    image_url = str(payload.get("image_url", "") or "").strip()
-    image_local_path = str(payload.get("image_local_path", "") or "").strip()
-    image_keyword = str(payload.get("image_keyword", "") or "").strip()
-    style_source = str(payload.get("style_source", "") or "").strip()
-    persona_id = str(payload.get("persona_id", "") or "").strip()
-    audience_id = str(payload.get("audience_id", "") or "").strip()
-    concept_id = str(payload.get("concept_id", "") or "").strip()
-    # 플랫폼 게시 API 는 공개 image_url 이 필요하다. image_local_path 는 Slack 미리보기용.
-    if image_url:
-        media_type = "IMAGE" if platform == "instagram" else "image"
-    else:
-        media_type = "text"
-
-    fm = {
-        "status": "pending",
-        "platform": platform,
-        "account": account,
-        "lang": lang,
-        "theme": _escape_fm(theme or ""),
-        "hook": _escape_fm(payload.get("hook", "")),
-        "hashtags": _escape_fm(payload.get("hashtags") or []),
-        "media_type": media_type,
-        "image_url": _escape_fm(image_url),
-        "image_local_path": _escape_fm(image_local_path),
-        "image_keyword": _escape_fm(image_keyword),
-        "style_source": _escape_fm(style_source),
-        "persona_id": _escape_fm(persona_id),
-        "audience_id": _escape_fm(audience_id),
-        "concept_id": _escape_fm(concept_id),
-        "created_at": ts,
-        "source": "content_pipeline_v1",
-    }
+    fm = draft_documents.build_draft_frontmatter(
+        platform=platform,
+        account=account,
+        lang=lang,
+        theme=theme,
+        payload=payload,
+        created_at=ts,
+    )
     body = payload.get("text", "").strip() + "\n"
-
-    lines = ["---"]
-    for k, v in fm.items():
-        lines.append(f"{k}: {v}")
-    lines.append("---")
-    lines.append("")
-    lines.append(body)
+    content = draft_documents.build_draft_markdown(fm, body)
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+        f.write(content)
     return path
 
 

@@ -19,6 +19,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from src.workflow import content_pipeline as p  # noqa: E402
+from src.domain import content_rules  # noqa: E402
 
 
 def _disabled_targets() -> set[tuple[str, str]]:
@@ -49,21 +50,11 @@ def _parse_json_content(content: str) -> dict:
 
 
 def _cta_for(account: str, lang: str) -> str:
-    return p._required_landing_cta(account, lang)
+    return content_rules.required_landing_cta(account, lang)
 
 
 def _fit_platform_limit(text: str, platform: str, account: str, lang: str) -> str:
-    limit = p.PLATFORM_LIMITS.get(platform)
-    if not limit or len(text) <= limit:
-        return text
-    cta = _cta_for(account, lang)
-    body = text
-    if cta in body:
-        body = body.replace(cta, "").strip()
-    room = max(0, limit - len(cta) - 2)
-    if len(body) > room:
-        body = body[: max(0, room - 1)].rstrip() + "…"
-    return f"{body}\n\n{cta}".strip()
+    return content_rules.fit_platform_limit(text, platform, account, lang)
 
 
 def _adapt_for_platform(base: dict, platform: str, account: str, lang: str,
