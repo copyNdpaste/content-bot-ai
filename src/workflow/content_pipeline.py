@@ -42,8 +42,8 @@ REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from src.application import draft_documents  # noqa: E402
-from src.domain import content_rules  # noqa: E402
+from src.application import draft_documents, draft_lifecycle  # noqa: E402
+from src.domain import content_rules, publication_targets  # noqa: E402
 
 SLACK_NOTIFIER = os.path.join(REPO_ROOT, "src", "slack", "slack_notifier.py")
 THREADS_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "threads_uploader.py")
@@ -1201,28 +1201,11 @@ def _write_draft(platform: str, account: str, lang: str, theme: str,
 
 def _parse_draft(path: str) -> tuple[dict, str]:
     with open(path, "r", encoding="utf-8") as f:
-        raw = f.read()
-    meta = {}
-    body = raw
-    if raw.startswith("---"):
-        parts = raw.split("---", 2)
-        if len(parts) >= 3:
-            for line in parts[1].splitlines():
-                line = line.strip()
-                if not line or ":" not in line:
-                    continue
-                k, _, v = line.partition(":")
-                meta[k.strip()] = v.strip()
-            body = parts[2].lstrip("\n")
-    return meta, body
+        return draft_lifecycle.parse_draft_markdown(f.read())
 
 
 def _rewrite_draft(path: str, meta: dict, body: str) -> None:
-    lines = ["---"]
-    for k, v in meta.items():
-        lines.append(f"{k}: {v}")
-    lines.append("---")
-    out = "\n".join(lines) + "\n\n" + (body or "").lstrip("\n")
+    out = draft_lifecycle.render_draft_markdown(meta, body)
     with open(path, "w", encoding="utf-8") as f:
         f.write(out)
 
@@ -1396,18 +1379,19 @@ def _run_uploader_for_draft(path: str, platform: str, account: str,
 
 
 def _queue_draft(path: str, meta: dict, body: str, until: str, error: str) -> None:
-    meta["status"] = "queued"
-    meta["queued_until"] = until
-    meta["queued_reason"] = "cooldown"
-    meta["last_error"] = _escape_fm(error[:500])
-    meta["queued_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    _rewrite_draft(path, meta, body)
+    queued = draft_lifecycle.mark_queued(
+        meta,
+        queued_until=until,
+        error=error,
+        queued_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+    )
+    _rewrite_draft(path, queued, body)
 
 
 def _auto_upload_after_slack(path: str, platform: str, account: str) -> dict:
     if platform == "x":
         meta, body = _parse_draft(path)
-        meta["status"] = "manual_upload_required"
+        meta = draft_lifecycle.mark_manual_upload_required(meta)
         _rewrite_draft(path, meta, body)
         _slack_update(
             meta.get("slack_channel", ""),
@@ -1427,12 +1411,12 @@ def _auto_upload_after_slack(path: str, platform: str, account: str) -> dict:
     result = _run_uploader_for_draft(path, platform, account, meta, body)
     if result.get("ok"):
         permalink = result.get("permalink") or "(permalink 없음)"
-        meta["status"] = "posted"
-        meta["posted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        if result.get("permalink"):
-            meta["permalink"] = result["permalink"]
-        if result.get("post_id"):
-            meta["platform_post_id"] = result["post_id"]
+        meta = draft_lifecycle.mark_posted(
+            meta,
+            posted_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            permalink=result.get("permalink") or "",
+            post_id=result.get("post_id") or "",
+        )
         _rewrite_draft(path, meta, body)
         _slack_update(
             meta.get("slack_channel", ""),
@@ -1466,9 +1450,11 @@ def _auto_upload_after_slack(path: str, platform: str, account: str) -> dict:
         })
         return {**result, "queued": True}
 
-    meta["status"] = "failed"
-    meta["last_error"] = _escape_fm(result.get("error", "")[:500])
-    meta["failed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    meta = draft_lifecycle.mark_failed(
+        meta,
+        error=result.get("error", ""),
+        failed_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+    )
     _rewrite_draft(path, meta, body)
     _slack_update(
         meta.get("slack_channel", ""),
@@ -1482,16 +1468,11 @@ def _auto_upload_after_slack(path: str, platform: str, account: str) -> dict:
 # ─── 회차 실행 ────────────────────────────────────────────────────────────
 
 def _expand(value: str, env_key: str, default: list) -> list:
-    if value == "all":
-        raw = (os.environ.get(env_key) or ",".join(default)).strip()
-        return [x.strip() for x in raw.split(",") if x.strip()]
-    return [v.strip() for v in value.split(",") if v.strip()]
+    return publication_targets.expand_targets(value, os.environ.get(env_key, ""), default)
 
 
 def _image_enabled_for(platform: str) -> bool:
-    raw = (os.environ.get("IMAGE_PLATFORMS") or "instagram,threads,x").strip()
-    enabled = {x.strip().lower() for x in raw.split(",") if x.strip()}
-    return platform.lower() in enabled or "all" in enabled
+    return publication_targets.image_enabled_for(platform, os.environ.get("IMAGE_PLATFORMS", ""))
 
 
 def run_round(platform: str, account: str, theme: str,

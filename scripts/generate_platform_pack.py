@@ -19,20 +19,11 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from src.workflow import content_pipeline as p  # noqa: E402
-from src.domain import content_rules  # noqa: E402
+from src.domain import content_rules, publication_targets  # noqa: E402
 
 
 def _disabled_targets() -> set[tuple[str, str]]:
-    raw = (os.environ.get("ROUTINE_DISABLED_TARGETS") or "").strip()
-    out = set()
-    for item in raw.split(","):
-        item = item.strip().lower()
-        if not item or ":" not in item:
-            continue
-        platform, account = [x.strip() for x in item.split(":", 1)]
-        if platform and account:
-            out.add((platform, account))
-    return out
+    return publication_targets.disabled_target_set(os.environ.get("ROUTINE_DISABLED_TARGETS", ""))
 
 
 def _parse_json_content(content: str) -> dict:
@@ -104,10 +95,7 @@ Base post:
 def generate_account_pack(account: str, theme: str, platforms: list[str]) -> dict:
     lang = p.ACCOUNT_LANG_DEFAULT.get(account.lower(), "ko")
     disabled = _disabled_targets()
-    platforms = [
-        platform for platform in platforms
-        if (platform.lower(), account.lower()) not in disabled
-    ]
+    platforms = publication_targets.filter_disabled_targets(platforms, account, disabled)
     if not platforms:
         return {"ok": True, "account": account, "skipped": "all targets disabled", "items": []}
 

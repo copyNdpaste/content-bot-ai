@@ -20,6 +20,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from src.workflow import content_pipeline as pipeline  # noqa: E402
+from src.domain import publication_targets  # noqa: E402
 
 LOG_PATH = "/tmp/contentbot-queued-upload-worker.log"
 DEFAULT_INTERVAL_SECONDS = 300
@@ -67,16 +68,7 @@ def _due(meta: dict) -> bool:
 
 
 def _disabled_targets() -> set[tuple[str, str]]:
-    raw = (os.environ.get("ROUTINE_DISABLED_TARGETS") or "").strip()
-    out = set()
-    for item in raw.split(","):
-        item = item.strip().lower()
-        if not item or ":" not in item:
-            continue
-        platform, account = [x.strip() for x in item.split(":", 1)]
-        if platform and account:
-            out.add((platform, account))
-    return out
+    return publication_targets.disabled_target_set(os.environ.get("ROUTINE_DISABLED_TARGETS", ""))
 
 
 def _iter_queued_drafts():
@@ -113,7 +105,7 @@ def run_once() -> dict:
             continue
         platform = meta.get("slack_platform") or meta.get("platform") or ""
         account = meta.get("slack_account") or meta.get("account") or "default"
-        if (platform.lower(), account.lower()) in disabled:
+        if publication_targets.is_target_disabled(platform, account, disabled):
             skipped += 1
             _log(f"비활성 타겟 스킵: {platform}/{account} {os.path.basename(path)}")
             continue
