@@ -31,23 +31,26 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
-import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # content-bot-ai 신규 레이아웃: src/workflow/ → 두 단계 위가 repo root
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 SLACK_NOTIFIER = os.path.join(REPO_ROOT, "src", "slack", "slack_notifier.py")
+THREADS_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "threads_uploader.py")
+INSTAGRAM_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "instagram_uploader.py")
+X_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "x_uploader.py")
 # drafts 는 repo 안 drafts/ (gitignored). tokens.json 은 src/auth/ 에.
 DRAFTS_DIR = os.path.join(REPO_ROOT, "drafts")
 # .env 는 repo root 에. (옛 money-ai 의 _company/_agents/instagram/.env 도 폴백)
 ENV_PATH = os.path.join(REPO_ROOT, ".env")
 ENV_PATH_LEGACY = os.path.join(REPO_ROOT, "_company", "_agents", "instagram", ".env")
 
-CLAUDE_MODEL = "claude-opus-4-7"  # 박재범 heavy tier
 CLAUDE_TIMEOUT_SEC = 180
+CODEX_TIMEOUT_SEC = 180
 PYTHON_BIN = sys.executable or "/opt/homebrew/bin/python3"
 
 PLATFORM_LIMITS = {
@@ -55,6 +58,9 @@ PLATFORM_LIMITS = {
     "threads": 500,
     "instagram": 2200,  # 캡션
 }
+
+STYLE_CONFIG_PATH = os.path.join(REPO_ROOT, "config", "content_styles.json")
+_STYLE_CACHE = None
 
 ACCOUNT_LANG_DEFAULT = {
     "jp": "ja",
@@ -115,7 +121,420 @@ def _fetch_trends(lang: str, limit: int = 8) -> list:
     return [t.strip() for t in titles[1:1 + limit] if t.strip()]
 
 
-# ─── Claude CLI 호출 ─────────────────────────────────────────────────────
+# ─── DB 기반 스타일 컨텍스트 ──────────────────────────────────────────────
+
+def _supabase_env() -> tuple[str, str]:
+    url = (
+        os.environ.get("CONTENT_STYLE_SUPABASE_URL")
+        or os.environ.get("SUPABASE_URL")
+        or ""
+    ).strip().rstrip("/")
+    key = (
+        os.environ.get("CONTENT_STYLE_SUPABASE_KEY")
+        or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        or os.environ.get("SUPABASE_ANON_KEY")
+        or os.environ.get("SUPABASE_KEY")
+        or ""
+    ).strip()
+    return url, key
+
+
+def _fetch_supabase_table(table: str, *, limit: int = 200) -> list:
+    url, key = _supabase_env()
+    if not url or not key:
+        return []
+    query = urllib.parse.urlencode({"select": "*", "limit": str(limit)})
+    req = urllib.request.Request(
+        f"{url}/rest/v1/{urllib.parse.quote(table)}?{query}",
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+            "User-Agent": "content-bot-ai-style-loader",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        sys.stderr.write(f"⚠️ Supabase 스타일 로드 실패({table}): {str(e)[:160]}\n")
+        return []
+
+
+def _supabase_request(method: str, table: str, payload=None, query: str = ""):
+    url, key = _supabase_env()
+    if not url or not key:
+        return None
+    endpoint = f"{url}/rest/v1/{urllib.parse.quote(table)}"
+    if query:
+        endpoint += f"?{query}"
+    data = None
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=data,
+        method=method,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Prefer": "return=representation,resolution=merge-duplicates",
+            "User-Agent": "content-bot-ai-learning-logger",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        body = r.read().decode("utf-8", errors="replace")
+    return json.loads(body) if body else None
+
+
+def _json_or_text(value):
+    if not value:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        try:
+            return json.loads(cleaned)
+        except Exception:
+            return {"raw": value[:12000]}
+    return {"raw": str(value)}
+
+
+def _learning_log_enabled() -> bool:
+    return (os.environ.get("CONTENT_LEARNING_LOG_ENABLED") or "true").lower() not in {
+        "0", "false", "no", "off"
+    }
+
+
+def _insert_generation_artifact(platform: str, account: str, lang: str, theme: str,
+                                draft_path: str, payload: dict,
+                                content_prompt: str) -> str:
+    if not _learning_log_enabled():
+        return ""
+    row = {
+        "draft_path": draft_path,
+        "platform_id": platform,
+        "account": account,
+        "language": lang,
+        "theme": theme or "",
+        "style_source": payload.get("style_source") or "",
+        "persona_id": payload.get("persona_id") or None,
+        "audience_id": payload.get("audience_id") or None,
+        "concept_id": payload.get("concept_id") or None,
+        "text": payload.get("text") or "",
+        "hook_text": payload.get("hook") or "",
+        "hashtags": payload.get("hashtags") or [],
+        "content_prompt": content_prompt,
+        "content_raw": _json_or_text(payload.get("raw")),
+        "image_prompt": payload.get("image_keyword") or "",
+        "image_prompt_raw": _json_or_text(payload.get("image_prompt_raw")),
+        "image_model": os.environ.get("OPENAI_IMAGE_MODEL") or "",
+        "image_quality": os.environ.get("OPENAI_IMAGE_QUALITY") or "",
+        "image_size": os.environ.get("OPENAI_IMAGE_SIZE") or "",
+        "image_output_format": os.environ.get("OPENAI_IMAGE_OUTPUT_FORMAT") or "",
+        "image_url": payload.get("image_url") or "",
+        "image_local_path": payload.get("image_local_path") or "",
+        "image_error": payload.get("image_error") or "",
+        "approval_status": "pending",
+    }
+    try:
+        query = urllib.parse.urlencode({"on_conflict": "draft_path"})
+        res = _supabase_request("POST", "content_generation_artifacts", [row], query)
+        if isinstance(res, list) and res:
+            artifact_id = str(res[0].get("id") or "")
+            sys.stderr.write(f"✅ 생성 아티팩트 DB 저장 완료 → {artifact_id}\n")
+            return artifact_id
+    except Exception as e:
+        sys.stderr.write(f"⚠️ 생성 아티팩트 DB 저장 스킵: {str(e)[:220]}\n")
+    return ""
+
+
+def _update_generation_artifact(draft_path: str, updates: dict) -> None:
+    if not _learning_log_enabled() or not draft_path or not updates:
+        return
+    clean = {k: v for k, v in updates.items() if v is not None}
+    if not clean:
+        return
+    try:
+        query = urllib.parse.urlencode({"draft_path": f"eq.{draft_path}"})
+        _supabase_request("PATCH", "content_generation_artifacts", clean, query)
+    except Exception as e:
+        sys.stderr.write(f"⚠️ 생성 아티팩트 DB 업데이트 스킵: {str(e)[:220]}\n")
+
+
+def _load_json_style_config() -> dict:
+    if not os.path.isfile(STYLE_CONFIG_PATH):
+        return {}
+    try:
+        with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        sys.stderr.write(f"⚠️ 로컬 스타일 config 로드 실패: {str(e)[:160]}\n")
+        return {}
+
+
+def _load_style_data() -> dict:
+    """Supabase DB 스타일 정의를 우선 로드하고, 로컬 JSON은 변주 보조로 사용."""
+    global _STYLE_CACHE
+    if _STYLE_CACHE is not None:
+        return _STYLE_CACHE
+
+    source = (os.environ.get("CONTENT_STYLE_SOURCE") or "auto").strip().lower()
+    local_config = _load_json_style_config()
+    data = {"source": "none", "local_config": local_config}
+
+    if source in {"auto", "supabase"}:
+        tables = {
+            "personas": _fetch_supabase_table("personas"),
+            "audiences": _fetch_supabase_table("audiences"),
+            "content_concepts": _fetch_supabase_table("content_concepts"),
+            "platforms": _fetch_supabase_table("platforms"),
+            "persona_audience_mapping": _fetch_supabase_table("persona_audience_mapping"),
+            "time_strategies": _fetch_supabase_table("time_strategies"),
+        }
+        if any(tables.values()):
+            data.update(tables)
+            data["source"] = "supabase"
+            _STYLE_CACHE = data
+            return data
+        if source == "supabase":
+            _STYLE_CACHE = data
+            return data
+
+    if local_config:
+        data["source"] = "json"
+    _STYLE_CACHE = data
+    return data
+
+
+def _by_id(rows: list, row_id: str) -> dict:
+    for row in rows or []:
+        if isinstance(row, dict) and str(row.get("id", "")) == row_id:
+            return row
+    return {}
+
+
+def _persona_id_for(account: str, lang: str) -> str:
+    if account.lower() == "jp" or lang == "ja":
+        return "JP_female"
+    return "KR_female"
+
+
+def _choose_persona_id(personas: list, account: str, lang: str) -> str:
+    nationality = "JP" if account.lower() == "jp" or lang == "ja" else "KR"
+    candidates = [
+        p for p in personas or []
+        if isinstance(p, dict)
+        and p.get("is_active", True)
+        and p.get("gender") == "female"
+        and p.get("nationality") == nationality
+        and (not p.get("primary_language") or p.get("primary_language") == lang)
+    ]
+    expanded = [
+        p for p in candidates
+        if str(p.get("id", "")) not in {"KR_female", "JP_female"}
+    ]
+    pool = expanded or candidates
+    if not pool:
+        return _persona_id_for(account, lang)
+    return str(random.choice(pool).get("id"))
+
+
+def _hour_kst() -> int:
+    return int(time.strftime("%H", time.gmtime(time.time() + 9 * 3600)))
+
+
+def _closest_strategy(strategies: list, persona_id: str, platform: str) -> dict:
+    candidates = [
+        s for s in strategies or []
+        if isinstance(s, dict)
+        and s.get("persona_id") == persona_id
+        and s.get("is_active", True)
+    ]
+    if not candidates:
+        return {}
+
+    platform = platform.lower()
+    platform_candidates = [
+        s for s in candidates
+        if platform in {str(x).lower() for x in (s.get("platform_pool") or [])}
+    ]
+    if platform_candidates:
+        candidates = platform_candidates
+
+    now_hour = _hour_kst()
+
+    def distance(row: dict) -> int:
+        h = int(row.get("hour_kst") or 0)
+        raw = abs(h - now_hour)
+        return min(raw, 24 - raw)
+
+    return sorted(candidates, key=distance)[0]
+
+
+def _choose_mapping(mappings: list, persona_id: str, audience_id: str = "") -> dict:
+    candidates = [
+        m for m in mappings or []
+        if isinstance(m, dict) and m.get("persona_id") == persona_id
+    ]
+    if audience_id:
+        exact = [m for m in candidates if m.get("audience_id") == audience_id]
+        if exact:
+            candidates = exact
+    if not candidates:
+        return {}
+    weighted = []
+    for m in candidates:
+        weight = max(1, int(m.get("priority_weight") or 1))
+        weighted.extend([m] * weight)
+    return random.choice(weighted)
+
+
+def _load_style_context(platform: str, account: str, lang: str) -> dict:
+    data = _load_style_data()
+    local = data.get("local_config") or {}
+
+    if data.get("source") == "supabase":
+        persona_id = _choose_persona_id(data.get("personas") or [], account, lang)
+        strategy = _closest_strategy(data.get("time_strategies"), persona_id, platform)
+        audience_id = random.choice(strategy.get("target_audience_ids") or [""])
+        mapping = _choose_mapping(data.get("persona_audience_mapping"), persona_id, audience_id)
+        if not audience_id:
+            audience_id = str(mapping.get("audience_id", "") or "")
+
+        concept_pool = list(strategy.get("concept_pool") or mapping.get("recommended_concepts") or [])
+        forbidden_concepts = set(mapping.get("forbidden_concepts") or [])
+        concept_pool = [c for c in concept_pool if c and c not in forbidden_concepts]
+        concept_id = random.choice(concept_pool) if concept_pool else ""
+
+        return {
+            "source": "supabase",
+            "persona": _by_id(data.get("personas"), persona_id),
+            "audience": _by_id(data.get("audiences"), audience_id),
+            "mapping": mapping,
+            "concept": _by_id(data.get("content_concepts"), concept_id),
+            "strategy": strategy,
+            "variation": _pick_local_variation(local, platform),
+        }
+
+    return {
+        "source": data.get("source", "none"),
+        "persona": random.choice((local.get("personas") or {}).get(account, []) or [{}]),
+        "audience": {},
+        "mapping": {},
+        "concept": {},
+        "strategy": {},
+        "variation": _pick_local_variation(local, platform),
+    }
+
+
+def _pick_local_variation(local: dict, platform: str) -> dict:
+    return {
+        "content_angle": random.choice(local.get("content_angles") or [""]),
+        "mood": random.choice(local.get("moods") or [""]),
+        "visual_style": random.choice(local.get("visual_styles") or [""]),
+        "platform_variation": random.choice(
+            (local.get("platform_variations") or {}).get(platform, []) or [""]
+        ),
+    }
+
+
+def _format_list(values, limit: int = 6) -> str:
+    if not values:
+        return ""
+    if isinstance(values, str):
+        return values
+    return ", ".join(str(x) for x in list(values)[:limit] if str(x).strip())
+
+
+def _build_style_context_block(ctx: dict, lang: str, platform: str) -> str:
+    if not ctx or ctx.get("source") == "none":
+        return ""
+    persona = ctx.get("persona") or {}
+    audience = ctx.get("audience") or {}
+    mapping = ctx.get("mapping") or {}
+    concept = ctx.get("concept") or {}
+    strategy = ctx.get("strategy") or {}
+    variation = ctx.get("variation") or {}
+
+    lines = [
+        "🧬 DB 스타일 컨텍스트:",
+        f"  - source: {ctx.get('source')}",
+    ]
+    if persona:
+        lines += [
+            f"  - persona: {persona.get('name') or persona.get('label') or persona.get('id')}",
+            f"    background: {persona.get('background_story') or persona.get('background') or ''}",
+            f"    speaking_style: {persona.get('speaking_style') or ''}",
+            f"    signature_phrases: {_format_list(persona.get('signature_phrases'))}",
+            f"    forbidden_phrases: {_format_list(persona.get('forbidden_phrases'))}",
+            f"    expertise: {_format_list(persona.get('expertise_areas'))}",
+        ]
+    if audience:
+        lines += [
+            f"  - audience: {audience.get('name') or audience.get('id')}",
+            f"    interests: {_format_list(audience.get('interests'))}",
+            f"    desires: {_format_list(audience.get('desires'))}",
+            f"    pain_points: {_format_list(audience.get('pain_points'))}",
+            f"    preferred_tone: {_format_list(audience.get('preferred_tone'))}",
+        ]
+    if mapping:
+        lines += [
+            f"  - matching_strategy: {mapping.get('matching_strategy') or ''}",
+            f"    tone_guideline: {mapping.get('tone_guideline') or ''}",
+            f"    topic_guideline: {mapping.get('topic_guideline') or ''}",
+            f"    recommended_concepts: {_format_list(mapping.get('recommended_concepts'))}",
+        ]
+    if concept:
+        lines += [
+            f"  - concept: {concept.get('id') or concept.get('format_type')}",
+            f"    goal: {concept.get('goal') or ''}",
+            f"    structure: {concept.get('structure_template') or ''}",
+            f"    hook_pattern: {concept.get('hook_pattern') or ''}",
+            f"    caution: {concept.get('cautions') or ''}",
+        ]
+    if strategy:
+        lines += [
+            f"  - time_strategy: {strategy.get('hour_kst')}시 / {strategy.get('tone') or ''}",
+            f"    tone_description: {strategy.get('tone_description') or ''}",
+            f"    topic_priority: {_format_list(strategy.get('topic_priority'))}",
+        ]
+    if variation:
+        lines += [
+            f"  - variation_for_this_post: {variation.get('platform_variation') or ''}",
+            f"    content_angle: {variation.get('content_angle') or ''}",
+            f"    mood: {variation.get('mood') or ''}",
+            f"    visual_style: {variation.get('visual_style') or ''}",
+        ]
+    lines += [
+        f"  - 적용 규칙: 위 컨텍스트를 {platform}/{lang} 글의 화자, 청자, 컨셉, 이미지 분위기에 반영.",
+        "  - 단, DB 문장을 그대로 복붙하지 말고 실제 사람이 쓴 것처럼 자연스럽게 변형.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _attach_style_meta(payload: dict, ctx: dict) -> None:
+    """draft frontmatter 에 추적 가능한 스타일 선택값만 남긴다."""
+    if not isinstance(payload, dict) or not isinstance(ctx, dict):
+        return
+    payload["style_source"] = ctx.get("source", "")
+    persona = ctx.get("persona") or {}
+    audience = ctx.get("audience") or {}
+    concept = ctx.get("concept") or {}
+    payload["persona_id"] = persona.get("id", "")
+    payload["audience_id"] = audience.get("id", "")
+    payload["concept_id"] = concept.get("id", "") or concept.get("format_type", "")
+
+
+# ─── 본문 생성 LLM 호출 ──────────────────────────────────────────────────
 
 BRAND_NAME = "OnlyFriends"
 LANDING_URL = "https://onlyfriends.tryproo.com/"
@@ -145,6 +564,25 @@ SOFT_MENTION_JA = [
 ]
 
 
+def _required_landing_cta(account: str, lang: str) -> str:
+    """계정별 필수 랜딩 CTA. 최종 본문 끝에 코드로 강제한다."""
+    if account.lower() == "jp" or lang == "ja":
+        return f"👉 韓国の友達を本当に作ってみたいなら → {LANDING_URL}"
+    return f"👉 일본 친구 진짜 만들어보고 싶으면 → {LANDING_URL}"
+
+
+def _ensure_required_landing_cta(payload: dict, account: str, lang: str) -> None:
+    if not isinstance(payload, dict):
+        return
+    text = str(payload.get("text") or "").rstrip()
+    if not text:
+        return
+    cta = _required_landing_cta(account, lang)
+    text = re.sub(r"\n*👉\s*(?:일본|한국|韓国|日本)[^\n]*tryproo\.com/?\s*$", "", text).rstrip()
+    text = re.sub(r"\n*https://onlyfriends\.tryproo\.com/?\s*$", "", text).rstrip()
+    payload["text"] = f"{text}\n\n{cta}"
+
+
 def _pick_soft_mention(lang: str) -> str:
     """자연스러운 brand mention 1개 — 광고 톤 X, 글 끝에 슬쩍."""
     pool = SOFT_MENTION_KO if lang == "ko" else SOFT_MENTION_JA
@@ -152,7 +590,8 @@ def _pick_soft_mention(lang: str) -> str:
 
 
 def _build_persona_prompt(platform: str, account: str, lang: str,
-                          theme: str, trends: list) -> str:
+                          theme: str, trends: list,
+                          style_context: dict | None = None) -> str:
     """실사용자 시뮬레이션 프롬프트 — 광고 카피 X, 진짜 사람 글 O.
 
     구조 핵심:
@@ -169,18 +608,17 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
     lang_label = {"ko": "한국어", "ja": "일본어"}.get(lang, "한국어")
     soft_mention = _pick_soft_mention(lang)
 
-    # 페르소나 — 광고 카피라이터 X. 'OnlyFriends 운영팀의 2030 여성 직원' 1인칭 빙의.
-    # 핵심: 본인이 OnlyFriends (한일 친구 매칭) 의 일부라서 자연스럽게 "우리 서비스" 라고 말함.
+    # 페르소나 — 광고 카피라이터 X. 운영자 관점은 갖되 글은 일반 SNS처럼 자연스럽게.
     persona_ko = (
         "당신은 '광고 카피라이터' 가 아닙니다.\n"
         "당신의 역할은 — **OnlyFriends (한일 친구 매칭 서비스) 의 20대 후반 한국인 운영팀 멤버** 로서, "
         "본인 일상·매칭 사례·여행 이야기를 Threads / X / Instagram 에 올리는 것입니다.\n"
         "\n"
         "📌 핵심 정체성:\n"
-        "  - 본인 계정 = OnlyFriends 공식 (jp 계정은 일본팀 / kr 계정은 한국팀)\n"
-        "  - 일반 사용자가 추천하는 톤 X — '우리 서비스에 이런 일 있었음' 1인칭 운영자 톤 O\n"
-        "  - 매일 매칭 사례·후기·여행기·일상이 자연스럽게 소재가 됨\n"
-        "  - 광고체 X, 친구한테 회사 얘기 하는 느낌\n"
+        "  - 운영자이지만 운영자 티를 과하게 내지 않음\n"
+        "  - 친구한테 카톡하듯, 오늘 있었던 일처럼 씀\n"
+        "  - 매칭 사례·후기·여행기·일상이 자연스럽게 소재가 됨\n"
+        "  - 브랜드/URL 은 매번 넣지 말고, 필요할 때만 끝에 아주 작게\n"
     )
     persona_ja = (
         "あなたは「広告コピーライター」ではありません。\n"
@@ -188,10 +626,10 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
         "として、自分の日常・マッチング事例・旅行話を Threads / X / Instagram に投稿することです。\n"
         "\n"
         "📌 核心アイデンティティ:\n"
-        "  - 自分のアカウント = OnlyFriends 公式 (jp = 日本チーム / kr = 韓国チーム)\n"
-        "  - 一般ユーザーが推薦するトーン X — '私たちのサービスにこんな話があったよ' 一人称運営者トーン O\n"
+        "  - 運営側だけど、運営感を強く出しすぎない\n"
+        "  - 友達にLINEするように、今日あった話みたいに書く\n"
         "  - 毎日のマッチング事例・口コミ・旅行記・日常が自然に話題になる\n"
-        "  - 広告調 X、友達に会社の話する感じ\n"
+        "  - ブランド/URL は毎回入れず、必要な時だけ最後に小さく\n"
     )
 
     # 핵심 목표 — 감정 유도 (서비스 소개 X)
@@ -271,74 +709,46 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
     # 채널별 톤
     channel_tone = {
         "x": (
-            f"X — 짧고 툭 던지는 느낌. 혼잣말 많이. 해시태그 거의 없음. "
-            f"**{limit}자 이내 (URL 포함)**."
+            f"X — 짧게 툭. 한 문장짜리 혼잣말도 OK. 농담/관찰/여운 중심. "
+            f"해시태그 0개 권장, URL 은 거의 넣지 않음. **{limit}자 이내**."
         ),
         "threads": (
-            f"Threads — 살짝 스토리텔링. 공감형. 댓글 달고 싶게 끝맺음. "
-            f"{limit}자 이내. 해시태그 0~2개."
+            f"Threads — 3~6줄 정도의 자연스러운 짧은 이야기. "
+            f"첫 줄은 공감 가능한 관찰, 마지막은 댓글 달고 싶게 살짝 열린 문장. "
+            f"{limit}자 이내. 해시태그 0~1개."
         ),
         "instagram": (
-            f"Instagram — 감성 일상 느낌. 사진 설명 같은 톤. 정보 전달형 금지. "
-            f"본문 {limit}자 이내. 해시태그 5~10개 (도배 X, 자연스럽게). "
+            f"Instagram — 사진 밑에 붙는 자연스러운 일상 캡션. "
+            f"문장은 너무 시처럼 쓰지 말고, 실제 사람이 올린 짧은 기록처럼. "
+            f"본문 {limit}자 이내. 해시태그 4~7개 (도배 X, 자연스럽게). "
             f"본문 분위기에 어울리는 **AI 이미지 생성용 영문 프롬프트** 도 image_keyword 에 함께 출력. "
-            f"\n"
-            f"🚨 매우 중요 — 사람은 OK, 단 얼굴 자체는 반드시 가려져 있어야 함:\n"
-            f"  FLUX 무료가 사람 얼굴·이목구비 그리면 80% 망가짐. 사람 등장은 일상감 살리되 "
-            f"얼굴은 항상 어떤 식으로든 가려서 안전하게.\n"
-            f"\n"
-            f"좋은 얼굴 가림 방법 (다양하게 섞기):\n"
-            f"  - 폰으로 얼굴 가리기 (셀카 찍는 거울 셀카, 폰이 얼굴 가림)\n"
-            f"  - 손으로 얼굴 가리기 (수줍게, 햇빛 가리는 척, 입가에 손)\n"
-            f"  - 모자·후드·마스크로 얼굴 가림 (yk2k 패션, 비니 + 마스크)\n"
-            f"  - 머리카락이 옆모습 가림 (긴 머리 늘어뜨림)\n"
-            f"  - 카메라·책·메뉴판·꽃다발이 얼굴 일부 가림\n"
-            f"  - 뒷모습·옆모습 (얼굴 안 보임)\n"
-            f"  - 실루엣 (역광·창가)\n"
-            f"  - 거울 셀카 (카메라가 얼굴 자리)\n"
-            f"  - 음식·커피 컵이 화면 전면, 사람 손만 보임\n"
-            f"\n"
-            f"형식: 영문 20~35 단어 + 끝에 반드시 'face hidden, no visible face, "
-            f"face out of frame, film grain, 35mm, instagram aesthetic, no text, no watermark' 첨부. "
-            f"\n"
-            f"좋은 예시:\n"
-            f"  - 'young korean woman taking mirror selfie in cozy cafe, phone covering her face "
-            f"completely, oversized hoodie, k-beauty aesthetic, soft afternoon light, film grain, "
-            f"35mm, face hidden by phone, no visible face, instagram aesthetic, no text, no watermark'\n"
-            f"  - 'girl from behind, long hair, sitting at tokyo cafe window, holding matcha "
-            f"latte, only back of head visible, soft window light, film grain, 35mm, no visible "
-            f"face, instagram aesthetic, no text, no watermark'\n"
-            f"  - 'two friends seoul cafe, both holding cameras covering their faces, oversized "
-            f"sweaters, candid laughter moment, soft morning light, film grain, 35mm, faces "
-            f"hidden by cameras, no visible faces, instagram aesthetic, no text, no watermark'\n"
-            f"  - 'silhouette of girl walking through shinjuku at night, neon lights backlit, "
-            f"only outline visible, cinematic, 35mm film, face out of frame, no visible face, "
-            f"instagram aesthetic, no text, no watermark'\n"
-            f"  - 'hands holding korean snack and matcha latte on rustic table, only forearms "
-            f"and hands visible, cropped composition, soft morning light, film grain, no face, "
-            f"instagram aesthetic, no text, no watermark'\n"
-            f"\n"
-            f"❌ 절대 금지 키워드: 'portrait', 'close-up face', 'smiling face', "
-            f"'eye contact', 'looking at camera' (얼굴 정면), 'two girls smiling at camera'"
+            f"인물은 반드시 성인 20대 후반~30대 초반 한국/일본 여성처럼 매우 세련되고 압도적으로 예쁘게 보이게. "
+            f"일반인 패션 금지. 아이돌 공항패션, K-pop 무대 밖 사복, 패션모델 스트릿 화보처럼 튀는 스타일링과 밝고 깨끗한 fair skin 톤을 선호. "
+            f"비 오는 날씨, 흐린 날씨, 노란 조명, 누런 피부톤은 금지. 화창한 낮 자연광으로. "
+            f"얼굴을 무조건 숨기지 말고, 카페/거리/여행 사진처럼 자연스러운 거리감의 장면으로. "
+            f"실존 인물처럼 특정 유명인을 닮게 하지 말고, 과한 정면 클로즈업/증명사진 느낌은 피함. "
+            f"만화풍/일러스트/애니풍은 금지. 완전 실사 인스타 라이프스타일 사진만 허용. "
+            f"flat vector, 로고, 텍스트, 워터마크는 금지."
         ),
     }.get(platform, "")
 
     # CTA — 자연스럽게, 광고 X
+    required_cta = _required_landing_cta(account, lang)
     cta_rule_ko = (
         "💬 CTA 규칙:\n"
-        "  - CTA 는 '광고' 가 아니라 **글 흐름상 자연스럽게 마지막에 슬쩍**\n"
-        f"  - 좋은 예 (참고): '{soft_mention}'\n"
+        "  - CTA 는 선택이 아니라 필수. 게시글 마지막 줄에 정확히 아래 문장을 넣음.\n"
+        f"  - 필수 마지막 문장: '{required_cta}'\n"
+        f"  - 참고 변형 예시는 쓰지 말고, 이번 실행에서는 필수 문장을 그대로 사용.\n"
         "  - 나쁜 예: '지금 가입하세요' '친구 만들고 싶다면?' '당신도 원하지 않나요?'\n"
-        f"  - URL ({LANDING_URL}) 은 본문 톤에 어울리면 살짝 첨부, 어색하면 생략 OK\n"
-        "  - 브랜드 언급은 최소화. 본문보다 존재감 강하면 실패\n"
+        "  - 본문은 자연스럽게 쓰되 마지막 CTA 는 반드시 유지\n"
     )
     cta_rule_ja = (
         "💬 CTA ルール:\n"
-        "  - CTA は「広告」ではなく **流れ的に自然に最後にそっと**\n"
-        f"  - 良い例 (参考): '{soft_mention}'\n"
+        "  - CTA は任意ではなく必須。投稿の最後の行に正確に下の文を入れる。\n"
+        f"  - 必須の最後の文: '{required_cta}'\n"
+        f"  - 参考例は使わず、今回の実行では必須文をそのまま使う。\n"
         "  - 悪い例: '今すぐ登録' '友達作りたい人は?' 'あなたも欲しくないですか?'\n"
-        f"  - URL ({LANDING_URL}) は本文に馴染めばそっと、不自然なら省略 OK\n"
-        "  - ブランド言及は最小限。本文より存在感強かったら失敗\n"
+        "  - 本文は自然に書くが、最後の CTA は必ず残す\n"
     )
 
     # 타겟 분위기
@@ -365,14 +775,18 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
     theme_block = ""
     if theme:
         theme_block = f"오늘 떠올린 주제: {theme}\n"
+    style_context_block = _build_style_context_block(style_context or {}, lang, platform)
 
     return (
         f"{persona}\n"
+        f"{style_context_block}\n"
         f"{goal}\n"
         f"{forbidden}\n"
         f"{style}\n"
         f"{audience}\n"
         f"{cta_rule}\n"
+        "중요: 문구가 조금 덜 완성돼 보여도 실제 사람 같으면 그쪽을 선택. "
+        "광고 문장, 캠페인 문장, 서비스 소개문처럼 보이면 실패.\n"
         f"📱 채널·언어: {platform.upper()} (@{account}) / {lang_label}\n"
         f"형식: {channel_tone}\n"
         "\n"
@@ -387,7 +801,7 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
             '{"text": "<게시될 본문 전체>", '
             '"hook": "<첫 한 줄>", '
             '"hashtags": ["<있으면 태그>"], '
-            '"image_keyword": "<IG 일 때만 — 영문 15~30단어, AI 이미지 생성 프롬프트 (사람·장면·조명·분위기 + no text, no watermark),'
+            '"image_keyword": "<IG 일 때만 — 영문 20~45단어, AI 이미지 생성 프롬프트 (20~30대 한국/일본인 분위기 + 장면·조명·분위기 + no text, no watermark),'
             "예: 'tokyo cafe friends', 'seoul night market'>\"}\n"
             if platform == "instagram"
             else '{"text": "<게시될 본문 전체>", '
@@ -407,7 +821,7 @@ def _call_claude(prompt: str) -> dict:
     cmd = [
         "claude",
         "-p", prompt,
-        "--model", CLAUDE_MODEL,
+        "--model", os.environ.get("CLAUDE_MODEL", "claude-opus-4-7"),
         "--output-format", "json",
     ]
     try:
@@ -480,49 +894,279 @@ def _call_claude(prompt: str) -> dict:
     }
 
 
-# ─── AI 이미지 생성 (Pollinations.ai — 무료, 키 0) ──────────────────────
-# Pollinations 는 GET 요청 자체가 이미지 생성·반환. URL 을 그대로 IG 업로더에
-# 넘기면 Meta API 가 그 URL 에서 다운로드해 게시. seed 로 재현성 보장 가능.
-# Fal.ai 폴백은 다음 라운드에 추가 예정.
+def _parse_content_json(content: str) -> dict:
+    cleaned = (content or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
 
-POLLINATIONS_BASE = "https://image.pollinations.ai/prompt"
+    parsed = None
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", cleaned, re.S)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                parsed = None
+    if not isinstance(parsed, dict) or not parsed.get("text"):
+        return {"ok": False, "error": f"JSON text 없음: {cleaned[:200]}"}
+
+    return {
+        "ok": True,
+        "text": str(parsed.get("text", "")).strip(),
+        "hook": str(parsed.get("hook", "")).strip(),
+        "hashtags": parsed.get("hashtags") or [],
+        "image_keyword": str(parsed.get("image_keyword", "") or "").strip(),
+        "raw": content,
+    }
 
 
-def _generate_pollinations_image(prompt: str, *, width: int = 1080, height: int = 1080,
-                                 model: str = "flux", seed: int = None) -> str | None:
-    """Pollinations.ai 로 AI 이미지 URL 생성.
+def _parse_image_prompt_json(content: str) -> dict:
+    cleaned = (content or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    parsed = None
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", cleaned, re.S)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                parsed = None
+    if not isinstance(parsed, dict) or not parsed.get("image_keyword"):
+        return {"ok": False, "error": f"image_keyword 없음: {cleaned[:200]}"}
+    return {
+        "ok": True,
+        "image_keyword": str(parsed.get("image_keyword", "")).strip(),
+        "raw": content,
+    }
 
-    - 프롬프트 비어있음 → None
-    - URL 자체가 GET 호출 시 이미지 binary 반환 (Meta API 가 받아서 게시 가능)
-    - seed 지정 가능 (None 이면 자동 랜덤)
-    - 모델: flux (FLUX.1-schnell, 기본 추천), turbo (더 빠르지만 품질 낮음)
-    - 호출 X (URL 만 빌드) — 실제 이미지 생성은 Meta 가 다운로드 시 일어남
-    - 프롬프트에 사람 회피·negative 가이드 자동 첨부 (FLUX 무료가 사람 얼굴 망침 회피)
-    """
+
+def _run_codex_json(instructions: str, *, timeout_env: str = "CODEX_TEXT_TIMEOUT_SEC") -> dict:
+    codex_bin = (os.environ.get("CODEX_BIN") or "/Users/hoony/.local/bin/codex").strip()
+    if not os.path.isfile(codex_bin):
+        codex_bin = "codex"
+
+    model = (os.environ.get("CODEX_TEXT_MODEL") or "").strip()
+    timeout = int(os.environ.get(timeout_env) or str(CODEX_TIMEOUT_SEC))
+    fd, output_path = tempfile.mkstemp(prefix="contentbot-codex-", suffix=".txt")
+    os.close(fd)
+    cmd = [
+        codex_bin,
+        "exec",
+        "--sandbox", "read-only",
+        "-C", REPO_ROOT,
+        "--output-last-message", output_path,
+    ]
+    if model:
+        cmd += ["--model", model]
+    cmd.append(instructions)
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return {"ok": False, "error": "codex CLI 미설치"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"codex CLI 타임아웃 ({timeout}s)"}
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        return {"ok": False, "error": f"codex exit {proc.returncode}: {err[:300]}"}
+
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        content = proc.stdout or ""
+    finally:
+        try:
+            os.unlink(output_path)
+        except Exception:
+            pass
+    return {"ok": True, "content": content}
+
+
+def _call_codex_content(prompt: str) -> dict:
+    """Codex CLI 로 채널별 SNS 문구 JSON 생성. OpenAI API 키를 직접 쓰지 않는다."""
+    instructions = (
+        "Return only one valid JSON object. No markdown. No explanation.\n"
+        "Required keys: text, hook, hashtags.\n"
+        "Write like an actual social media user, not a marketer.\n\n"
+        + prompt
+    )
+    res = _run_codex_json(instructions)
+    if not res.get("ok"):
+        return res
+    return _parse_content_json(res.get("content", ""))
+
+
+def _call_codex_image_prompt(platform: str, lang: str, post_text: str,
+                             hook: str = "", hashtags=None,
+                             style_context: dict | None = None) -> dict:
+    """생성된 게시글 본문을 기반으로 이미지 생성 프롬프트를 만든다."""
+    tag_text = ", ".join(hashtags or [])
+    style_block = _build_style_context_block(style_context or {}, lang, platform)
+    instructions = f"""
+Return only one valid JSON object. No markdown. No explanation.
+Required key: image_keyword.
+
+Create an English image-generation prompt that matches this {platform} post.
+Use GPT image generation, not SVG illustration.
+Generate a high-quality AI image similar to ChatGPT image generation quality.
+Create a fully photorealistic Instagram lifestyle photo. Never use anime, manga, illustration, cartoon, or vector style.
+Create a trendy, candid 2020s social-media photo with detailed lighting, real skin texture, natural lens depth, and believable environment.
+The main subject should look like an exceptionally beautiful, stylish adult woman in her late 20s to early 30s from Korea or Japan when people fit the post.
+Avoid ordinary casual fashion. Use eye-catching idol airport fashion, off-duty K-pop idol styling, fashion-model street editorial styling, statement outfit, luxury accessories, trendy hair, and polished glam details without resembling any real celebrity.
+Use idol/model-inspired styling without resembling any real celebrity: natural glam makeup, striking but realistic facial features, symmetrical photogenic face, contemporary hair, fashionable statement outfit, slim elegant proportions, and a polished influencer/editorial look.
+Use bright fair skin tones and clean natural complexion. Avoid yellowish skin, muddy color grading, orange indoor lighting, dull gray lighting, and rainy or cloudy weather.
+Prefer sunny clear daytime, bright outdoor natural light, fresh spring/summer atmosphere, clean white-balanced color, and airy Instagram editorial photography.
+Do not generate flat vector graphics, anime, manga, webtoon, 3D render, doll-like skin, or over-smoothed AI faces.
+The image must feel like an attention-grabbing candid social media visual, not an ad.
+No text in the image, no logos, no watermark.
+Show exceptionally attractive late-20s to early-30s Korean and Japanese adult women when it fits the post.
+Faces may be visible if they look like fictional, natural social-media people.
+Avoid minors, teenage appearance, celebrity likeness, plastic-perfect faces, ID-photo portraits, extreme close-up headshots, or direct model-stare poses.
+Use a natural candid distance, cafe/travel/street/stadium composition, and contemporary Korean/Japanese styling.
+For baseball-related posts, lean into the trendy beautiful woman at baseball stadium vibe: stylish jersey, idol-like hair and makeup, bright daytime stadium, cheering crowd, food in hand, candid friend-taken photo.
+Use concrete scene details from the post: place, mood, weather, objects, time of day.
+Use the DB style context below for persona, mood, and visual variation when present.
+Keep it 30-55 English words.
+
+{style_block}
+Post language: {lang}
+Hook: {hook}
+Hashtags: {tag_text}
+Post:
+{post_text}
+"""
+    res = _run_codex_json(instructions)
+    if not res.get("ok"):
+        return res
+    return _parse_image_prompt_json(res.get("content", ""))
+
+
+# ─── 외부 이미지 생성 커맨드 (Codex/자동화 훅) ─────────────────────────────
+
+
+def _image_prompt_with_safety(prompt: str) -> str:
+    """SNS 게시용 이미지 프롬프트에 품질/금지 가이드를 보강."""
     p = (prompt or "").strip()
     if not p:
-        return None
-    # 자동 safety suffix — 사람 OK 단 얼굴 가려야 (FLUX 가 얼굴 잘 못 그려서)
+        return ""
     safety_suffix = (
-        ", face hidden, no visible face, face out of frame, "
-        "no eye contact, film grain, 35mm, instagram aesthetic, "
-        "no text, no watermark, no logo"
+        ", fully photorealistic Instagram lifestyle photo, exceptionally beautiful adult Korean or Japanese woman "
+        "in her late 20s to early 30s, eye-catching idol airport fashion, off-duty K-pop idol styling, "
+        "fashion-model street editorial outfit, statement accessories, natural glam makeup, striking realistic face, "
+        "idol/model-inspired styling without celebrity likeness, bright fair skin tone, clean natural complexion, "
+        "sunny clear daytime, bright outdoor natural light, clean white-balanced color, no rainy weather, no cloudy weather, "
+        "no yellowish skin, no orange indoor lighting, candid social media scene, cinematic lighting, detailed textures, natural skin texture, "
+        "no anime, no manga, no illustration, no cartoon, no vector, no 3D render, no text, no watermark, no logo, "
+        "no minors, no teenage appearance, no celebrity likeness, no ID photo, no extreme close-up"
     )
-    if "face hidden" not in p.lower() and "no visible face" not in p.lower() \
-            and "no people" not in p.lower():
+    lower = p.lower()
+    if "no text" not in lower or "no watermark" not in lower:
         p = p + safety_suffix
-    if seed is None:
-        seed = random.randint(1, 1_000_000_000)
-    qs = urllib.parse.urlencode({
-        "width": width,
-        "height": height,
-        "model": model,
-        "seed": seed,
-        "nologo": "true",
-        "enhance": "true",
-    })
-    encoded = urllib.parse.quote(p, safe="")
-    return f"{POLLINATIONS_BASE}/{encoded}?{qs}"
+    return p
+
+
+def _format_command_template(template: str, values: dict) -> list:
+    """환경변수 커맨드 템플릿을 shell 없이 argv 로 변환."""
+    quoted = {k: shlex.quote(str(v)) for k, v in values.items()}
+    return shlex.split(template.format(**quoted))
+
+
+def _generate_codex_image(prompt: str, *, width: int = 1024, height: int = 1024) -> str | None:
+    """CODEX_IMAGE_COMMAND 실행 → /tmp/codex-image-*.png 경로 반환.
+
+    이 프로젝트는 이미지 생성 API 를 직접 호출하지 않는다. 외부 커맨드가
+    `{prompt}` 와 `{output}` 을 받아 이미지 파일을 만들어야 한다.
+    """
+    template = (os.environ.get("CODEX_IMAGE_COMMAND") or "").strip()
+    if not template:
+        sys.stderr.write("ℹ️ CODEX_IMAGE_COMMAND 미설정 — 이미지 생성 스킵\n")
+        return None
+
+    p = _image_prompt_with_safety(prompt)
+    if not p:
+        return None
+
+    ts = int(time.time())
+    out_path = f"/tmp/codex-image-{ts}-{random.randint(1000, 9999)}.png"
+    timeout = int(os.environ.get("CODEX_IMAGE_TIMEOUT_SEC") or "600")
+
+    try:
+        cmd = _format_command_template(template, {
+            "prompt": p,
+            "output": out_path,
+            "width": width,
+            "height": height,
+        })
+        sys.stderr.write(
+            f"🎨 외부 이미지 생성 시작 ({width}x{height}) → {out_path}\n"
+        )
+        sys.stderr.flush()
+        t0 = time.time()
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        elapsed = time.time() - t0
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"❌ 이미지 생성 커맨드 타임아웃 ({timeout}s)\n")
+        return None
+    except Exception as e:
+        sys.stderr.write(f"❌ 이미지 생성 커맨드 실행 실패: {e}\n")
+        return None
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        sys.stderr.write(f"❌ 이미지 생성 커맨드 실패: {err[:500]}\n")
+        return None
+
+    if not os.path.isfile(out_path):
+        sys.stderr.write(f"⚠️ 이미지 생성 커맨드 출력 파일 없음: {out_path}\n")
+        return None
+
+    sys.stderr.write(f"✅ 외부 이미지 생성 완료 ({elapsed:.1f}s) → {out_path}\n")
+    sys.stderr.flush()
+    return out_path
+
+
+def _publish_image_url(image_path: str) -> str | None:
+    """IMAGE_PUBLIC_URL_COMMAND 실행 → Instagram API 용 공개 HTTPS URL 반환."""
+    template = (os.environ.get("IMAGE_PUBLIC_URL_COMMAND") or "").strip()
+    if not template:
+        sys.stderr.write("ℹ️ IMAGE_PUBLIC_URL_COMMAND 미설정 — IG 이미지 URL 생성 스킵\n")
+        return None
+    if not image_path or not os.path.isfile(image_path):
+        return None
+
+    timeout = int(os.environ.get("IMAGE_PUBLIC_URL_TIMEOUT_SEC") or "180")
+    try:
+        cmd = _format_command_template(template, {"file": image_path})
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"❌ 이미지 URL 커맨드 타임아웃 ({timeout}s)\n")
+        return None
+    except Exception as e:
+        sys.stderr.write(f"❌ 이미지 URL 커맨드 실행 실패: {e}\n")
+        return None
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        sys.stderr.write(f"❌ 이미지 URL 커맨드 실패: {err[:500]}\n")
+        return None
+
+    url = (proc.stdout or "").strip().splitlines()[-1].strip()
+    if not url.startswith("https://"):
+        sys.stderr.write(f"❌ 이미지 URL 커맨드가 HTTPS URL 을 반환하지 않음: {url[:200]}\n")
+        return None
+
+    sys.stderr.write(f"✅ 이미지 공개 URL 생성 완료 → {url}\n")
+    sys.stderr.flush()
+    return url
 
 
 # ─── draft 저장 ───────────────────────────────────────────────────────────
@@ -550,11 +1194,16 @@ def _write_draft(platform: str, account: str, lang: str, theme: str,
     filename = f"{platform}-{ts}-{account}.md"
     path = os.path.join(DRAFTS_DIR, filename)
 
-    # IG 일 때만 이미지 첨부 흐름 작동. 다른 채널은 text 유지.
     image_url = str(payload.get("image_url", "") or "").strip()
+    image_local_path = str(payload.get("image_local_path", "") or "").strip()
     image_keyword = str(payload.get("image_keyword", "") or "").strip()
-    if platform == "instagram" and image_url:
-        media_type = "IMAGE"
+    style_source = str(payload.get("style_source", "") or "").strip()
+    persona_id = str(payload.get("persona_id", "") or "").strip()
+    audience_id = str(payload.get("audience_id", "") or "").strip()
+    concept_id = str(payload.get("concept_id", "") or "").strip()
+    # 플랫폼 게시 API 는 공개 image_url 이 필요하다. image_local_path 는 Slack 미리보기용.
+    if image_url:
+        media_type = "IMAGE" if platform == "instagram" else "image"
     else:
         media_type = "text"
 
@@ -568,7 +1217,12 @@ def _write_draft(platform: str, account: str, lang: str, theme: str,
         "hashtags": _escape_fm(payload.get("hashtags") or []),
         "media_type": media_type,
         "image_url": _escape_fm(image_url),
+        "image_local_path": _escape_fm(image_local_path),
         "image_keyword": _escape_fm(image_keyword),
+        "style_source": _escape_fm(style_source),
+        "persona_id": _escape_fm(persona_id),
+        "audience_id": _escape_fm(audience_id),
+        "concept_id": _escape_fm(concept_id),
         "created_at": ts,
         "source": "content_pipeline_v1",
     }
@@ -586,9 +1240,68 @@ def _write_draft(platform: str, account: str, lang: str, theme: str,
     return path
 
 
+def _parse_draft(path: str) -> tuple[dict, str]:
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read()
+    meta = {}
+    body = raw
+    if raw.startswith("---"):
+        parts = raw.split("---", 2)
+        if len(parts) >= 3:
+            for line in parts[1].splitlines():
+                line = line.strip()
+                if not line or ":" not in line:
+                    continue
+                k, _, v = line.partition(":")
+                meta[k.strip()] = v.strip()
+            body = parts[2].lstrip("\n")
+    return meta, body
+
+
+def _rewrite_draft(path: str, meta: dict, body: str) -> None:
+    lines = ["---"]
+    for k, v in meta.items():
+        lines.append(f"{k}: {v}")
+    lines.append("---")
+    out = "\n".join(lines) + "\n\n" + (body or "").lstrip("\n")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(out)
+
+
 # ─── Slack 알림 호출 ──────────────────────────────────────────────────────
 
-def _notify_slack(draft_path: str, platform: str, account: str) -> dict:
+def _slack_upload_preview(image_local_path: str, platform: str, account: str) -> dict:
+    """Slack files_upload_v2 로 로컬 이미지 미리보기 게시.
+       (생성된 로컬 이미지 결과를 채널에서 검토 가능.)
+       slack_notifier.py 의 chat.postMessage (본문 + ✅/❌ 버튼) 직전에 호출."""
+    if not image_local_path or not os.path.isfile(image_local_path):
+        return {"ok": False, "skipped": "no local image"}
+    bot_token = (os.environ.get("SLACK_BOT_TOKEN") or "").strip()
+    channel_id = (os.environ.get("SLACK_CHANNEL_ID") or "").strip()
+    if not bot_token or not channel_id:
+        return {"ok": False, "skipped": "no slack token/channel"}
+    try:
+        from slack_sdk import WebClient
+    except ImportError:
+        return {"ok": False, "error": "slack-sdk 미설치"}
+    try:
+        client = WebClient(token=bot_token)
+        client.files_upload_v2(
+            channel=channel_id,
+            file=image_local_path,
+            title=f"{platform} draft preview ({account})",
+            initial_comment=(
+                f"🖼️ 이미지 생성 미리보기 — {platform}/{account}\n"
+                f"(아래 본문 카드에서 ✅/❌ 결정)"
+            ),
+        )
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+def _notify_slack(draft_path: str, platform: str, account: str,
+                  mode: str = "approval") -> dict:
     """slack_notifier.py subprocess. 결과 dict 반환."""
     if not os.path.isfile(SLACK_NOTIFIER):
         return {"ok": False, "error": f"slack_notifier 없음: {SLACK_NOTIFIER}"}
@@ -597,6 +1310,7 @@ def _notify_slack(draft_path: str, platform: str, account: str) -> dict:
         "--draft-path", draft_path,
         "--platform", platform,
         "--account", account,
+        "--mode", mode,
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -615,6 +1329,197 @@ def _notify_slack(draft_path: str, platform: str, account: str) -> dict:
     return {"ok": True, "result": parsed}
 
 
+def _slack_api_post(method: str, payload: dict) -> dict:
+    bot_token = (os.environ.get("SLACK_BOT_TOKEN") or "").strip()
+    if not bot_token:
+        return {"ok": False, "error": "no slack token"}
+    url = f"https://slack.com/api/{method}"
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json; charset=utf-8")
+    req.add_header("Authorization", f"Bearer {bot_token}")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode("utf-8", errors="replace")
+        res = json.loads(raw)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+    if not res.get("ok"):
+        return {"ok": False, "error": res.get("error", "unknown")}
+    return res
+
+
+def _slack_update(channel: str, ts: str, header: str, detail: str) -> None:
+    if not channel or not ts:
+        return
+    _slack_api_post("chat.update", {
+        "channel": channel,
+        "ts": ts,
+        "text": f"{header}: {detail[:120]}",
+        "blocks": [{
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{header}*\n{detail[:2900]}"},
+        }],
+    })
+
+
+def _cooldown_until_from_error(error: str) -> str:
+    m = re.search(r"COOLDOWN_UNTIL=([0-9T:\-]+Z)", error or "")
+    if m:
+        return m.group(1)
+    m = re.search(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z)", error or "")
+    return m.group(1) if m else ""
+
+
+def _run_uploader_for_draft(path: str, platform: str, account: str,
+                            meta: dict, body: str) -> dict:
+    if platform == "x":
+        return {"ok": False, "manual": True, "error": "X는 수동 업로드 모드입니다."}
+
+    if platform == "threads":
+        uploader = THREADS_UPLOADER
+        cmd = [PYTHON_BIN, uploader, "--text", body, "--account", account]
+        if meta.get("image_url"):
+            cmd += ["--image-url", meta["image_url"], "--media-type", "image"]
+    elif platform == "instagram":
+        uploader = INSTAGRAM_UPLOADER
+        cmd = [PYTHON_BIN, uploader, "--caption", body, "--account", account]
+        if meta.get("image_url"):
+            cmd += ["--image-url", meta["image_url"]]
+        media_type = meta.get("media_type") or "IMAGE"
+        cmd += ["--media-type", media_type]
+    else:
+        return {"ok": False, "error": f"알 수 없는 플랫폼: {platform}"}
+
+    if not os.path.isfile(uploader):
+        return {"ok": False, "error": f"uploader 없음: {uploader}"}
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            cwd=REPO_ROOT,
+            env=os.environ.copy(),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "uploader 타임아웃"}
+    except Exception as e:
+        return {"ok": False, "error": f"uploader subprocess 실패: {e}"}
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    if proc.returncode != 0:
+        cooldown_until = _cooldown_until_from_error(err)
+        return {
+            "ok": False,
+            "error": err or f"exit {proc.returncode}",
+            "cooldown_until": cooldown_until,
+        }
+
+    try:
+        parsed = json.loads(out.splitlines()[-1]) if out else {}
+    except Exception:
+        parsed = {}
+    return {
+        "ok": True,
+        "permalink": parsed.get("permalink", "") or "",
+        "post_id": (
+            parsed.get("media_id")
+            or parsed.get("thread_id")
+            or parsed.get("tweet_id")
+            or ""
+        ),
+        "raw_result": parsed,
+        "raw": out[-400:],
+    }
+
+
+def _queue_draft(path: str, meta: dict, body: str, until: str, error: str) -> None:
+    meta["status"] = "queued"
+    meta["queued_until"] = until
+    meta["queued_reason"] = "cooldown"
+    meta["last_error"] = _escape_fm(error[:500])
+    meta["queued_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    _rewrite_draft(path, meta, body)
+
+
+def _auto_upload_after_slack(path: str, platform: str, account: str) -> dict:
+    if platform == "x":
+        meta, body = _parse_draft(path)
+        meta["status"] = "manual_upload_required"
+        _rewrite_draft(path, meta, body)
+        _slack_update(
+            meta.get("slack_channel", ""),
+            meta.get("slack_ts", ""),
+            "𝕏 수동 업로드 필요",
+            "X API 크레딧 문제로 자동 업로드하지 않습니다. Slack의 문구와 이미지를 X에 직접 업로드하세요.",
+        )
+        return {"ok": True, "manual": True}
+
+    meta, body = _parse_draft(path)
+    _slack_update(
+        meta.get("slack_channel", ""),
+        meta.get("slack_ts", ""),
+        "⏳ 자동 업로드 중",
+        f"`{platform}` / `{account}`",
+    )
+    result = _run_uploader_for_draft(path, platform, account, meta, body)
+    if result.get("ok"):
+        permalink = result.get("permalink") or "(permalink 없음)"
+        meta["status"] = "posted"
+        meta["posted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        if result.get("permalink"):
+            meta["permalink"] = result["permalink"]
+        if result.get("post_id"):
+            meta["platform_post_id"] = result["post_id"]
+        _rewrite_draft(path, meta, body)
+        _slack_update(
+            meta.get("slack_channel", ""),
+            meta.get("slack_ts", ""),
+            "✅ 자동 업로드 완료",
+            f"`{platform}` / `{account}`\n🔗 {permalink}",
+        )
+        _update_generation_artifact(path, {
+            "approval_status": "posted",
+            "posted_at": meta["posted_at"],
+            "permalink": result.get("permalink") or "",
+            "platform_post_id": result.get("post_id") or "",
+        })
+        return result
+
+    cooldown_until = result.get("cooldown_until") or ""
+    if cooldown_until:
+        _queue_draft(path, meta, body, cooldown_until, result.get("error", ""))
+        _slack_update(
+            meta.get("slack_channel", ""),
+            meta.get("slack_ts", ""),
+            "⏳ 쿨다운 큐 등록",
+            (
+                f"`{platform}` / `{account}`\n"
+                f"Meta/X 제한 때문에 `{cooldown_until}` 이후 자동 재시도합니다."
+            ),
+        )
+        _update_generation_artifact(path, {
+            "approval_status": "queued",
+            "last_error": result.get("error", "")[:500],
+        })
+        return {**result, "queued": True}
+
+    meta["status"] = "failed"
+    meta["last_error"] = _escape_fm(result.get("error", "")[:500])
+    meta["failed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    _rewrite_draft(path, meta, body)
+    _slack_update(
+        meta.get("slack_channel", ""),
+        meta.get("slack_ts", ""),
+        "❌ 자동 업로드 실패",
+        result.get("error", "unknown"),
+    )
+    return result
+
+
 # ─── 회차 실행 ────────────────────────────────────────────────────────────
 
 def _expand(value: str, env_key: str, default: list) -> list:
@@ -624,62 +1529,132 @@ def _expand(value: str, env_key: str, default: list) -> list:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+def _image_enabled_for(platform: str) -> bool:
+    raw = (os.environ.get("IMAGE_PLATFORMS") or "instagram,threads,x").strip()
+    enabled = {x.strip().lower() for x in raw.split(",") if x.strip()}
+    return platform.lower() in enabled or "all" in enabled
+
+
 def run_round(platform: str, account: str, theme: str,
               dry_run: bool = False) -> dict:
     """단일 (platform, account) 회차 1번 실행."""
     lang = ACCOUNT_LANG_DEFAULT.get(account.lower(), "ko")
 
     trends = _fetch_trends(lang)
-    prompt = _build_persona_prompt(platform, account, lang, theme, trends)
+    style_context = _load_style_context(platform, account, lang)
+    prompt = _build_persona_prompt(platform, account, lang, theme, trends, style_context)
 
     if dry_run:
-        # 실제 LLM 호출 없이 더미 draft + Slack 알림 스킵
-        # IG 일 때 image_keyword 추출 흐름은 실제로 시도 (Pexels 키 있으면 호출됨)
-        dummy_keyword = ""
-        if platform == "instagram":
-            # 트렌드 첫 키워드 (있으면) 또는 기본값을 영문 키워드처럼 사용
-            dummy_keyword = "tokyo cafe friends" if lang == "ja" else "seoul cafe friends"
+        # 실제 LLM 호출 없이 더미 draft + Slack 알림 스킵.
         payload = {
             "text": f"[DRY-RUN {platform}/{account}] 테마={theme or '자동'} 트렌드={len(trends)}개 수집됨.",
             "hook": "[DRY-RUN]",
             "hashtags": [],
-            "image_keyword": dummy_keyword,
+            "image_keyword": "",
         }
-        if platform == "instagram" and dummy_keyword:
-            img = _generate_pollinations_image(dummy_keyword)
-            if img:
-                payload["image_url"] = img
+        _attach_style_meta(payload, style_context)
+        _ensure_required_landing_cta(payload, account, lang)
+        if _image_enabled_for(platform):
+            img_prompt = _call_codex_image_prompt(
+                platform, lang, payload["text"], payload["hook"], payload["hashtags"], style_context
+            )
+            if img_prompt.get("ok"):
+                payload["image_keyword"] = img_prompt["image_keyword"]
+                payload["image_prompt_raw"] = img_prompt.get("raw", "")
+            else:
+                payload["image_keyword"] = (
+                    "cozy cafe table with coffee, travel notebook and phone, "
+                    "soft natural light, candid social media photo, no text, no watermark"
+                )
+            local_path = _generate_codex_image(payload["image_keyword"])
+            if local_path:
+                payload["image_local_path"] = local_path
+                image_url = _publish_image_url(local_path)
+                if image_url:
+                    payload["image_url"] = image_url
         path = _write_draft(platform, account, lang, theme, payload)
+        artifact_id = _insert_generation_artifact(
+            platform, account, lang, theme, path, payload, prompt
+        )
         return {
             "ok": True,
             "draft_path": path,
+            "artifact_id": artifact_id,
             "slack": {"skipped": "dry-run"},
             "trends_fetched": len(trends),
-            "image_attached": bool(payload.get("image_url")),
+            "image_attached": bool(payload.get("image_local_path")),
             "dry_run": True,
         }
 
-    result = _call_claude(prompt)
+    result = _call_codex_content(prompt)
+    if not result.get("ok") and os.environ.get("CONTENT_LLM_FALLBACK", "claude") == "claude":
+        sys.stderr.write(f"⚠️ Codex 본문 생성 실패 — Claude 폴백: {result.get('error', '')}\n")
+        result = _call_claude(prompt)
     if not result.get("ok"):
-        return {"ok": False, "error": result.get("error", "claude 실패"),
+        return {"ok": False, "error": result.get("error", "본문 생성 실패"),
                 "platform": platform, "account": account}
+    _attach_style_meta(result, style_context)
+    _ensure_required_landing_cta(result, account, lang)
 
-    # IG 일 때만 Pexels 로 이미지 자동 첨부
-    if platform == "instagram":
-        kw = result.get("image_keyword", "") or ""
-        if kw:
-            img_url = _generate_pollinations_image(kw)
-            if img_url:
-                result["image_url"] = img_url
+    # 이미지 자동 생성:
+    #   게시글 본문을 기반으로 이미지 프롬프트를 별도 생성한 뒤 이미지를 만든다.
+    if _image_enabled_for(platform):
+        img_prompt = _call_codex_image_prompt(
+            platform,
+            lang,
+            result.get("text", ""),
+            result.get("hook", ""),
+            result.get("hashtags") or [],
+            style_context,
+        )
+        if img_prompt.get("ok"):
+            result["image_keyword"] = img_prompt["image_keyword"]
+            result["image_prompt_raw"] = img_prompt.get("raw", "")
+            local_path = _generate_codex_image(result["image_keyword"])
+            if local_path:
+                result["image_local_path"] = local_path
+                image_url = _publish_image_url(local_path)
+                if image_url:
+                    result["image_url"] = image_url
+            else:
+                result["image_error"] = "external_image_generation_failed"
+        else:
+            result["image_error"] = img_prompt.get("error", "image_prompt_failed")
 
     path = _write_draft(platform, account, lang, theme, result)
-    slack = _notify_slack(path, platform, account)
+    artifact_id = _insert_generation_artifact(
+        platform, account, lang, theme, path, result, prompt
+    )
+
+    # IG + 로컬 이미지 있으면 Slack files_upload_v2 로 네이티브 미리보기 먼저 게시.
+    # files.upload 와 interactive blocks (✅/❌) 동시 사용 X → 두 단계 분리.
+    slack_upload = {"skipped": "no local image"}
+    local_path = result.get("image_local_path", "")
+    if _image_enabled_for(platform) and local_path:
+        slack_upload = _slack_upload_preview(local_path, platform, account)
+
+    slack_mode = "manual" if platform == "x" else "auto"
+    slack = _notify_slack(path, platform, account, mode=slack_mode)
+    if isinstance(slack, dict):
+        slack["upload"] = slack_upload
+        slack_result = slack.get("result") if isinstance(slack.get("result"), dict) else {}
+        _update_generation_artifact(path, {
+            "slack_channel": slack_result.get("channel"),
+            "slack_ts": slack_result.get("ts"),
+            "slack_upload_ok": bool(slack_upload.get("ok")),
+        })
+    auto_upload = {"skipped": "slack_not_failed"}
+    if slack.get("ok"):
+        auto_upload = _auto_upload_after_slack(path, platform, account)
     return {
         "ok": True,
         "draft_path": path,
+        "artifact_id": artifact_id,
         "slack": slack,
+        "auto_upload": auto_upload,
         "trends_fetched": len(trends),
         "image_attached": bool(result.get("image_url")),
+        "image_local_path": local_path,
         "platform": platform,
         "account": account,
     }
@@ -732,7 +1707,9 @@ def main() -> int:
                 "account": account,
                 "ok": r.get("ok"),
                 "draft_path": r.get("draft_path"),
+                "artifact_id": r.get("artifact_id"),
                 "slack": r.get("slack"),
+                "auto_upload": r.get("auto_upload"),
                 "error": r.get("error"),
             })
             if not r.get("ok"):

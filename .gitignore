@@ -19,6 +19,10 @@ tokens.json
 # Drafts (런타임 데이터)
 drafts/
 **/drafts/
+.runtime/
+**/.runtime/
+var/
+**/var/
 
 # OS
 .DS_Store

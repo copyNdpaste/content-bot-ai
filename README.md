@@ -8,7 +8,7 @@
 ```
 [ 트렌드 수집 ] → [ Claude Opus 4.7 컨텐츠 생성 ] → [ draft 저장 ]
                           ↓
-[ Slack ✅/❌ 카드 ] ← [ 이미지 자동 첨부 (Pollinations·Fal) ]
+[ Slack ✅/❌ 카드 ] ← [ 이미지 생성 미리보기 첨부 ]
         ↓ 승인
 [ Threads / IG / X 자동 게시 (jp/kr 계정 분기) ]
 ```
