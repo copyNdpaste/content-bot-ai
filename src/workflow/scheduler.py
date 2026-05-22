@@ -3,13 +3,15 @@
 """박재범 자율 회차 스케줄러 데몬.
 
 ROUTINE_MIN_HOURS ~ ROUTINE_MAX_HOURS 사이 **랜덤** 간격 (분 단위 정밀도) 으로
-content_pipeline.py 를 호출 — 매 회차마다 다른 시간차로 게시해서 봇 패턴 회피.
+generate_platform_pack.py 를 호출 — 계정별 이미지 1장 + 플랫폼별 문구를 생성한다.
 launchd 가 RunAtLoad=true, KeepAlive=true 로 띄우는 것을 전제.
 
 env (.env 또는 launchd):
   ROUTINE_MIN_HOURS       기본 2.0  (랜덤 하한)
   ROUTINE_MAX_HOURS       기본 3.0  (랜덤 상한)
   ROUTINE_INTERVAL_HOURS  (legacy 폴백 — 있으면 min=max 로 사용)
+  ROUTINE_ACTIVE_START_HOUR 기본 9   (KST, 이 시각부터 회차 시작)
+  ROUTINE_ACTIVE_END_HOUR   기본 23  (KST, 이 시각부터 다음날까지 대기)
   ROUTINE_PLATFORMS       기본 threads,instagram,x
   ROUTINE_ACCOUNTS        기본 jp,kr
   TELEGRAM_BOT_TOKEN/CHAT_ID  알림 폴백
@@ -29,12 +31,14 @@ import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-PIPELINE = os.path.join(HERE, "content_pipeline.py")
-ENV_PATH = os.path.join(REPO_ROOT, "_company", "_agents", "instagram", ".env")
+REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+PACK_GENERATOR = os.path.join(REPO_ROOT, "scripts", "generate_platform_pack.py")
+ENV_PATH = os.path.join(REPO_ROOT, ".env")
+ENV_PATH_LEGACY = os.path.join(REPO_ROOT, "_company", "_agents", "instagram", ".env")
 
 PYTHON_BIN = sys.executable or "/opt/homebrew/bin/python3"
 LOG_PATH = "/tmp/contentbot-content-scheduler.log"
+STATE_PATH = os.path.join(REPO_ROOT, "var", "content-scheduler-state.json")
 
 _STOP = False
 
@@ -106,11 +110,20 @@ def _next_interval_seconds() -> tuple:
     """매 회차마다 호출 — ROUTINE_MIN_HOURS ~ MAX_HOURS 사이 랜덤 초.
        반환: (seconds, human_label)  예: (8521, "2시간 22분")
        legacy ROUTINE_INTERVAL_HOURS 가 있으면 min=max 로 처리 (옛 동작 호환)."""
+    min_h, max_h = _interval_bounds()
+    hours = random.uniform(min_h, max_h)
+    seconds = int(hours * 3600)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    return seconds, f"{h}시간 {m}분"
+
+
+def _interval_bounds() -> tuple[float, float]:
     legacy = (os.environ.get("ROUTINE_INTERVAL_HOURS") or "").strip()
     if legacy:
         try:
             h = float(legacy)
-            min_h = max_h = max(0.1, min(h, 24.0))
+            min_h = max_h = h
         except ValueError:
             min_h, max_h = 2.0, 3.0
     else:
@@ -122,14 +135,97 @@ def _next_interval_seconds() -> tuple:
             max_h = float((os.environ.get("ROUTINE_MAX_HOURS") or "3.0").strip())
         except ValueError:
             max_h = 3.0
-    # 안전: 0.1h(6분) ~ 24h, min<=max 보장
-    min_h = max(0.1, min(min_h, 24.0))
+    # 안전: 자동 게시는 최소 2시간 간격으로 고정한다.
+    min_h = max(2.0, min(min_h, 24.0))
     max_h = max(min_h, min(max_h, 24.0))
-    hours = random.uniform(min_h, max_h)
-    seconds = int(hours * 3600)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    return seconds, f"{h}시간 {m}분"
+    return min_h, max_h
+
+
+def _read_state() -> dict:
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_state(patch: dict) -> None:
+    data = _read_state()
+    data.update(patch)
+    data["updated_at"] = int(time.time())
+    try:
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, STATE_PATH)
+    except Exception as e:
+        _log(f"상태 파일 저장 실패: {e}")
+
+
+def _seconds_until_min_interval_elapsed() -> int:
+    last_started = _read_state().get("last_run_started_at")
+    try:
+        last_started = int(last_started)
+    except Exception:
+        return 0
+    min_h, _max_h = _interval_bounds()
+    remaining = int((last_started + min_h * 3600) - time.time())
+    return max(0, remaining)
+
+
+def _sleep_interruptibly(seconds: int) -> None:
+    slept = 0
+    seconds = max(0, int(seconds))
+    while slept < seconds and not _STOP:
+        time.sleep(1)
+        slept += 1
+
+
+def _active_hours() -> tuple[int, int]:
+    try:
+        start = int((os.environ.get("ROUTINE_ACTIVE_START_HOUR") or "9").strip())
+    except ValueError:
+        start = 9
+    try:
+        end = int((os.environ.get("ROUTINE_ACTIVE_END_HOUR") or "23").strip())
+    except ValueError:
+        end = 23
+    start = max(0, min(start, 23))
+    end = max(1, min(end, 24))
+    if end <= start:
+        end = min(start + 1, 24)
+    return start, end
+
+
+def _kst_now() -> tuple[int, int]:
+    t = time.gmtime(time.time() + 9 * 3600)
+    return t.tm_hour, t.tm_min
+
+
+def _seconds_until_next_active_start() -> tuple[int, str]:
+    start, end = _active_hours()
+    now = time.time()
+    kst = time.gmtime(now + 9 * 3600)
+    hour = kst.tm_hour
+    minute = kst.tm_min
+    second = kst.tm_sec
+
+    if hour < start:
+        delta = ((start - hour) * 3600) - (minute * 60) - second
+    else:
+        delta = ((24 - hour + start) * 3600) - (minute * 60) - second
+    delta = max(60, int(delta))
+    next_label = time.strftime("%Y-%m-%d %H:%M KST", time.gmtime(now + delta + 9 * 3600))
+    return delta, next_label
+
+
+def _within_active_window() -> bool:
+    start, end = _active_hours()
+    hour, _minute = _kst_now()
+    return start <= hour < end
 
 
 def _run_pipeline_once() -> dict:
@@ -137,9 +233,9 @@ def _run_pipeline_once() -> dict:
     accounts = os.environ.get("ROUTINE_ACCOUNTS", "jp,kr").strip() or "all"
 
     cmd = [
-        PYTHON_BIN, PIPELINE,
-        "--platform", platforms,
-        "--account", accounts,
+        PYTHON_BIN, PACK_GENERATOR,
+        "--platforms", platforms,
+        "--accounts", accounts,
     ]
     _log(f"회차 시작: {' '.join(cmd)}")
     _push_telegram(f"🚀 박재범 회차 시작\nplatforms={platforms} accounts={accounts}")
@@ -187,12 +283,31 @@ def main() -> int:
     signal.signal(signal.SIGINT, _sig_handler)
 
     _load_env_file(ENV_PATH)
-    _log(f"스케줄러 부팅 — pipeline={PIPELINE}")
-    _push_telegram("🛰️ 박재범 스케줄러 부팅 — 회차마다 2~3시간 사이 랜덤 간격")
+    _load_env_file(ENV_PATH_LEGACY)
+    _log(f"스케줄러 부팅 — pack_generator={PACK_GENERATOR}")
+    start, end = _active_hours()
+    min_h, max_h = _interval_bounds()
+    _push_telegram(
+        f"🛰️ 박재범 스케줄러 부팅 — {start}:00~{end}:00 KST, "
+        f"회차마다 {min_h:g}~{max_h:g}시간 사이 랜덤 간격"
+    )
 
-    # 시작 즉시 1회 실행 (launchd RunAtLoad 와 자연스럽게 결합)
     while not _STOP:
+        if not _within_active_window():
+            wait, next_label = _seconds_until_next_active_start()
+            _log(f"운영 시간 외 — 다음 시작 {next_label}")
+            _sleep_interruptibly(wait)
+            continue
+
+        remaining = _seconds_until_min_interval_elapsed()
+        if remaining > 0:
+            next_at = time.strftime("%H:%M", time.localtime(time.time() + remaining))
+            _log(f"최소 2시간 간격 보호 — {remaining // 60}분 후 재개 ({next_at} 예정)")
+            _sleep_interruptibly(remaining)
+            continue
+
         try:
+            _write_state({"last_run_started_at": int(time.time())})
             _run_pipeline_once()
         except Exception as e:
             _log(f"메인 루프 예외: {e}\n{traceback.format_exc()}")
@@ -203,14 +318,20 @@ def main() -> int:
 
         # 다음 회차까지 대기 — 매번 새 랜덤 간격 (봇 패턴 회피)
         interval, label = _next_interval_seconds()
+        if not _within_active_window():
+            interval, next_label = _seconds_until_next_active_start()
+            label = f"운영 시간 외 대기 → {next_label}"
+        else:
+            start, end = _active_hours()
+            next_hour = time.gmtime(time.time() + interval + 9 * 3600).tm_hour
+            if next_hour < start or next_hour >= end:
+                interval, next_label = _seconds_until_next_active_start()
+                label = f"다음 운영 시간까지 대기 → {next_label}"
         next_at = time.strftime("%H:%M", time.localtime(time.time() + interval))
         _log(f"다음 회차: {label} 후 ({next_at} 예정)")
         _push_telegram(f"⏳ 다음 회차: {label} 후 ({next_at})")
 
-        slept = 0
-        while slept < interval and not _STOP:
-            time.sleep(1)
-            slept += 1
+        _sleep_interruptibly(interval)
 
     _log("스케줄러 종료")
     _push_telegram("🛑 박재범 스케줄러 종료")

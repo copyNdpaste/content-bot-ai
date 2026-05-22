@@ -34,9 +34,14 @@
         <!-- claude CLI 위치 보강 (nvm·brew 양쪽 커버) -->
         <key>PATH</key>
         <string>/Users/hoony/.nvm/versions/node/v22.22.2/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <!-- 기본 회차 주기 (시간). .env 의 ROUTINE_INTERVAL_HOURS 가 있으면 그게 우선. -->
-        <key>ROUTINE_INTERVAL_HOURS</key>
-        <string>4</string>
+        <key>ROUTINE_MIN_HOURS</key>
+        <string>2</string>
+        <key>ROUTINE_MAX_HOURS</key>
+        <string>3</string>
+        <key>ROUTINE_ACTIVE_START_HOUR</key>
+        <string>9</string>
+        <key>ROUTINE_ACTIVE_END_HOUR</key>
+        <string>23</string>
     </dict>
 </dict>
 </plist>
