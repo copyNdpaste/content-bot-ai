@@ -593,7 +593,7 @@ def cmd_refresh() -> int:
             failed.append(f"X[{acct}]: refresh_token 없음 — 재발급 필요")
             continue
         if not x_client_id:
-            failed.append(f"X[{acct}]: X_CLIENT_ID 미설정 — .env 확인")
+            skipped.append(f"X[{acct}] 수동 업로드 모드 — X_CLIENT_ID 미설정으로 refresh 스킵")
             continue
         try:
             resp = _x_refresh(rt, x_client_id, x_client_secret)
