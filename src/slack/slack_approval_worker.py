@@ -54,6 +54,8 @@ THREADS_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "threads_uploader
 INSTAGRAM_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "instagram_uploader.py")
 X_UPLOADER = os.path.join(REPO_ROOT, "src", "uploaders", "x_uploader.py")
 LANDING_URL = "https://onlyfriends.tryproo.com/"
+INSTAGRAM_APP_STORE_CTA_KO = "👉 앱스토어에서 OnlyFriends 검색하고 일본 친구 만들기"
+INSTAGRAM_APP_STORE_CTA_JA = "👉 App StoreでOnlyFriendsを検索して、韓国の友達作り"
 
 
 def _load_env_file(path: str) -> None:
@@ -109,7 +111,11 @@ def write_draft(path: str, meta: dict, body: str):
         f.write(out)
 
 
-def _required_landing_cta(account: str, lang: str = "") -> str:
+def _required_landing_cta(account: str, lang: str = "", platform: str = "") -> str:
+    if (platform or "").lower() == "instagram":
+        if account.lower() == "jp" or lang == "ja":
+            return INSTAGRAM_APP_STORE_CTA_JA
+        return INSTAGRAM_APP_STORE_CTA_KO
     if account.lower() == "jp" or lang == "ja":
         return f"👉 韓国の友達を本当に作ってみたいなら → {LANDING_URL}"
     return f"👉 일본 친구 진짜 만들어보고 싶으면 → {LANDING_URL}"
@@ -121,7 +127,8 @@ def _ensure_required_landing_cta(meta: dict, body: str) -> str:
         return text
     account = meta.get("slack_account") or meta.get("account") or "kr"
     lang = meta.get("lang") or ""
-    cta = _required_landing_cta(account, lang)
+    platform = meta.get("slack_platform") or meta.get("platform") or meta.get("target") or ""
+    cta = _required_landing_cta(account, lang, platform)
     text = __import__("re").sub(
         r"\n*👉\s*(?:일본|한국|韓国|日本)[^\n]*tryproo\.com/?\s*$",
         "",
@@ -129,6 +136,11 @@ def _ensure_required_landing_cta(meta: dict, body: str) -> str:
     ).rstrip()
     text = __import__("re").sub(
         r"\n*https://onlyfriends\.tryproo\.com/?\s*$",
+        "",
+        text,
+    ).rstrip()
+    text = __import__("re").sub(
+        r"\n*👉\s*(?:앱스토어|App Store)[^\n]*(?:친구 만들기|友達作り)\s*$",
         "",
         text,
     ).rstrip()

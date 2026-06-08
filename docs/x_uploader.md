@@ -44,9 +44,23 @@ X access_token 은 2시간 만료 → token_manager 가 30분 이내면 자동 r
 
 ---
 
+## 현재 운영 정책
+
+X API 는 최신 공식 문서 기준 pay-per-usage 입니다. OAuth 토큰 발급 자체는 가능하지만
+자동 게시 요청은 API credit 을 소비할 수 있으므로, 기본 운영 플로우에서는 X 를 자동
+업로드하지 않고 Slack 수동 업로드 카드로 보냅니다.
+
+- Slack 카드의 `𝕏 작성창 열기` 버튼: 본문이 미리 채워진 X 작성창을 엽니다.
+- Slack 카드의 `이미지 열기` 버튼: 이미지를 열어 사용자가 직접 저장/첨부합니다.
+- X Web Intent 는 본문/URL/해시태그 등만 미리 채울 수 있고, 이미지 파일을 작성창에
+  자동 첨부하는 공식 파라미터는 없습니다.
+
+API 자동 게시가 필요할 때만 아래 OAuth 절차를 사용하세요.
+
 ## X Developer Portal — OAuth 2.0 토큰 발급 6단계
 
-> ⚠️ 신규: 2024년부터 Free tier 도 자동 게시 가능 (월 500 tweets/post 한도, 24h read 100).
+> 참고: 과거 Free tier 안내가 있었지만, 현재 공식 X API 문서는 credit 기반
+> pay-per-usage pricing 을 안내합니다. 실제 단가는 Developer Console 에서 확인하세요.
 
 ### 1) 앱 생성
 - https://developer.x.com → "Sign up for Free Account" (이미 계정 있으면 Dashboard)

@@ -107,6 +107,38 @@ def _draft_id(draft_path: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in base)
 
 
+def _x_intent_url(text: str) -> str:
+    """Return an X Web Intent URL with the draft text prefilled."""
+    query = urllib.parse.urlencode({"text": (text or "").strip()})
+    return f"https://x.com/intent/tweet?{query}"
+
+
+def _manual_x_action_buttons(draft_id: str, body: str, media_url: str = "") -> dict:
+    elements = [
+        {
+            "type": "button",
+            "style": "primary",
+            "text": {"type": "plain_text", "text": "𝕏 작성창 열기", "emoji": True},
+            "action_id": f"open_x_compose_{draft_id}",
+            "value": draft_id,
+            "url": _x_intent_url(body),
+        },
+    ]
+    if media_url and media_url.startswith(("http://", "https://")):
+        elements.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "이미지 열기", "emoji": True},
+            "action_id": f"open_x_media_{draft_id}",
+            "value": draft_id,
+            "url": media_url,
+        })
+    return {
+        "type": "actions",
+        "block_id": f"x_manual_{draft_id}",
+        "elements": elements,
+    }
+
+
 # ─── Telegram 폴백 ─────────────────────────────────────────────────────────
 
 def _push_telegram(message: str) -> bool:
@@ -213,10 +245,12 @@ def _build_blocks(meta: dict, body: str, platform: str, account: str,
                 "text": (
                     "*𝕏 수동 업로드 필요*\n"
                     "X API 크레딧 문제로 자동 업로드하지 않습니다. "
-                    "위 문구와 이미지를 X에 직접 올려주세요."
+                    "버튼을 누르면 본문이 들어간 X 작성창이 열립니다. "
+                    "이미지는 별도 버튼에서 열어 저장/업로드하세요."
                 ),
             },
         })
+        blocks.append(_manual_x_action_buttons(draft_id, body, image_url or video_url))
     elif mode == "auto":
         blocks.append({
             "type": "context",

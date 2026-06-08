@@ -566,13 +566,18 @@ SOFT_MENTION_JA = [
 ]
 
 
-def _required_landing_cta(account: str, lang: str) -> str:
+def _required_landing_cta(account: str, lang: str, platform: str = "") -> str:
     """계정별 필수 랜딩 CTA. 최종 본문 끝에 코드로 강제한다."""
-    return content_rules.required_landing_cta(account, lang)
+    return content_rules.required_landing_cta(account, lang, platform)
 
 
-def _ensure_required_landing_cta(payload: dict, account: str, lang: str) -> None:
-    content_rules.enforce_payload_cta(payload, account, lang)
+def _ensure_required_landing_cta(
+    payload: dict,
+    account: str,
+    lang: str,
+    platform: str = "",
+) -> None:
+    content_rules.enforce_payload_cta(payload, account, lang, platform)
 
 
 def _pick_soft_mention(lang: str) -> str:
@@ -725,7 +730,7 @@ def _build_persona_prompt(platform: str, account: str, lang: str,
     }.get(platform, "")
 
     # CTA — 자연스럽게, 광고 X
-    required_cta = _required_landing_cta(account, lang)
+    required_cta = _required_landing_cta(account, lang, platform)
     cta_rule_ko = (
         "💬 CTA 규칙:\n"
         "  - CTA 는 선택이 아니라 필수. 게시글 마지막 줄에 정확히 아래 문장을 넣음.\n"
@@ -1393,12 +1398,6 @@ def _auto_upload_after_slack(path: str, platform: str, account: str) -> dict:
         meta, body = _parse_draft(path)
         meta = draft_lifecycle.mark_manual_upload_required(meta)
         _rewrite_draft(path, meta, body)
-        _slack_update(
-            meta.get("slack_channel", ""),
-            meta.get("slack_ts", ""),
-            "𝕏 수동 업로드 필요",
-            "X API 크레딧 문제로 자동 업로드하지 않습니다. Slack의 문구와 이미지를 X에 직접 업로드하세요.",
-        )
         return {"ok": True, "manual": True}
 
     meta, body = _parse_draft(path)
@@ -1493,7 +1492,7 @@ def run_round(platform: str, account: str, theme: str,
             "image_keyword": "",
         }
         _attach_style_meta(payload, style_context)
-        _ensure_required_landing_cta(payload, account, lang)
+        _ensure_required_landing_cta(payload, account, lang, platform)
         if _image_enabled_for(platform):
             img_prompt = _call_codex_image_prompt(
                 platform, lang, payload["text"], payload["hook"], payload["hashtags"], style_context
@@ -1534,7 +1533,7 @@ def run_round(platform: str, account: str, theme: str,
         return {"ok": False, "error": result.get("error", "본문 생성 실패"),
                 "platform": platform, "account": account}
     _attach_style_meta(result, style_context)
-    _ensure_required_landing_cta(result, account, lang)
+    _ensure_required_landing_cta(result, account, lang, platform)
 
     # 이미지 자동 생성:
     #   게시글 본문을 기반으로 이미지 프롬프트를 별도 생성한 뒤 이미지를 만든다.

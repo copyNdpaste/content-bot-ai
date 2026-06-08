@@ -40,8 +40,8 @@ def _parse_json_content(content: str) -> dict:
     }
 
 
-def _cta_for(account: str, lang: str) -> str:
-    return content_rules.required_landing_cta(account, lang)
+def _cta_for(platform: str, account: str, lang: str) -> str:
+    return content_rules.required_landing_cta(account, lang, platform)
 
 
 def _fit_platform_limit(text: str, platform: str, account: str, lang: str) -> str:
@@ -56,7 +56,7 @@ def _adapt_for_platform(base: dict, platform: str, account: str, lang: str,
         return out
 
     limit = p.PLATFORM_LIMITS.get(platform, 500)
-    cta = _cta_for(account, lang)
+    cta = _cta_for(platform, account, lang)
     style_block = p._build_style_context_block(style_context, lang, platform)
     instructions = f"""
 Return only one valid JSON object. No markdown. No explanation.
@@ -87,7 +87,7 @@ Base post:
             "raw": "",
         }
     out = _parse_json_content(res.get("content", ""))
-    p._ensure_required_landing_cta(out, account, lang)
+    p._ensure_required_landing_cta(out, account, lang, platform)
     out["text"] = _fit_platform_limit(out["text"], platform, account, lang)
     return out
 
@@ -110,7 +110,7 @@ def generate_account_pack(account: str, theme: str, platforms: list[str]) -> dic
         return {"ok": False, "account": account, "error": base.get("error", "content failed")}
 
     p._attach_style_meta(base, style_context)
-    p._ensure_required_landing_cta(base, account, lang)
+    p._ensure_required_landing_cta(base, account, lang, "instagram")
 
     adapted_payloads = {}
     combined_text_parts = [f"instagram:\n{base.get('text', '')}"]
@@ -121,7 +121,7 @@ def generate_account_pack(account: str, theme: str, platforms: list[str]) -> dic
         else:
             payload = _adapt_for_platform(base, platform, account, lang, style_context)
         p._attach_style_meta(payload, style_context)
-        p._ensure_required_landing_cta(payload, account, lang)
+        p._ensure_required_landing_cta(payload, account, lang, platform)
         payload["text"] = _fit_platform_limit(payload.get("text", ""), platform, account, lang)
         adapted_payloads[platform] = payload
         if platform != "instagram":

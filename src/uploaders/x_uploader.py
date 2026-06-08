@@ -26,7 +26,7 @@ X API v2 + OAuth 2.0 (PKCE / Authorization Code) 기반.
          --reply-to 1234567890 --account jp
 
 옵션:
-  --text          본문 (필수, 280자 제한 — Free tier 기준)
+  --text          본문 (필수, 280자 제한)
   --media-url     미디어 URL (다중 가능 — --media-url u1 --media-url u2)
   --media-type    image | video (미디어 있을 때 필수)
   --account       jp / kr / ... (tokens.json 의 x[*] 키)

@@ -186,6 +186,22 @@ def _is_action_block_error(message: str) -> bool:
     )
 
 
+def _is_media_not_available_error(message: str) -> bool:
+    data = _extract_error_json(message)
+    err = data.get("error") or {}
+    text = " ".join([
+        message or "",
+        str(err.get("message") or ""),
+        str(err.get("error_user_msg") or ""),
+    ])
+    return (
+        err.get("code") == 9007
+        or err.get("error_subcode") == 2207027
+        or "Media ID is not available" in text
+        or "아직 준비가 완료되지 않아" in text
+    )
+
+
 def _load_cooldowns() -> dict:
     if not os.path.isfile(COOLDOWNS_PATH):
         return {}
@@ -250,7 +266,7 @@ def _set_action_block_cooldown(account: str, raw_error: str) -> str:
 
 def _poll_container_status(container_id: str, access_token: str,
                            max_tries: int = 30, interval: int = 5) -> str:
-    """REELS/VIDEO 컨테이너는 publish 전 status_code=FINISHED 까지 폴링."""
+    """컨테이너가 publish 가능한 FINISHED 상태가 될 때까지 폴링."""
     q = urllib.parse.urlencode({
         "fields": "status_code,status",
         "access_token": access_token,
@@ -260,16 +276,19 @@ def _poll_container_status(container_id: str, access_token: str,
     for _ in range(max_tries):
         try:
             data = _http_get(status_url)
-            sc = (data.get("status_code") or "").upper()
-            last = sc
-            if sc == "FINISHED":
-                return sc
-            if sc in ("ERROR", "EXPIRED"):
-                raise RuntimeError(
-                    f"IG container 처리 실패 (status_code={sc}): {data.get('status', '')}"
-                )
-        except RuntimeError:
-            pass
+        except RuntimeError as e:
+            last = str(e)[:160]
+            time.sleep(interval)
+            continue
+
+        sc = (data.get("status_code") or "").upper()
+        last = sc
+        if sc == "FINISHED":
+            return sc
+        if sc in ("ERROR", "EXPIRED"):
+            raise RuntimeError(
+                f"IG container 처리 실패 (status_code={sc}): {data.get('status', '')}"
+            )
         time.sleep(interval)
     raise RuntimeError(f"IG container 인코딩 타임아웃 (last={last or '?'})")
 
@@ -281,6 +300,24 @@ def _create_container(ig_user_id: str, payload: dict) -> str:
     if not cid:
         raise RuntimeError(f"IG create 응답에 id 없음: {created}")
     return cid
+
+
+def _publish_container(ig_user_id: str, creation_id: str, access_token: str) -> dict:
+    publish_url = f"{IG_API_BASE}/{urllib.parse.quote(ig_user_id)}/media_publish"
+    last_error = ""
+    for attempt in range(6):
+        try:
+            return _http_post(publish_url, {
+                "creation_id": creation_id,
+                "access_token": access_token,
+            })
+        except RuntimeError as e:
+            last_error = str(e)
+            if not _is_media_not_available_error(last_error) or attempt == 5:
+                raise
+            _poll_container_status(creation_id, access_token, max_tries=6, interval=5)
+            time.sleep(5)
+    raise RuntimeError(last_error or "IG media_publish 실패")
 
 
 def _real_post(caption: str, media_urls, carousel_types, media_type: str,
@@ -323,6 +360,7 @@ def _real_post(caption: str, media_urls, carousel_types, media_type: str,
             "access_token": access_token,
         }
         parent_id = _create_container(ig_user_id, parent_payload)
+        _poll_container_status(parent_id, access_token)
         publish_creation_id = parent_id
 
     # ─── REELS ─────────────────────────────────────────────────────────
@@ -349,14 +387,11 @@ def _real_post(caption: str, media_urls, carousel_types, media_type: str,
             "access_token": access_token,
         }
         creation_id = _create_container(ig_user_id, payload)
+        _poll_container_status(creation_id, access_token)
         publish_creation_id = creation_id
 
     # publish
-    publish_url = f"{IG_API_BASE}/{urllib.parse.quote(ig_user_id)}/media_publish"
-    published = _http_post(publish_url, {
-        "creation_id": publish_creation_id,
-        "access_token": access_token,
-    })
+    published = _publish_container(ig_user_id, publish_creation_id, access_token)
     media_id = published.get("id") or publish_creation_id
 
     # permalink (best-effort)

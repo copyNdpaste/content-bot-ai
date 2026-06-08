@@ -47,3 +47,20 @@ Feature: Content publication guardrails
     Given a draft upload returns a permalink and platform post id
     When the draft lifecycle marks the draft as posted
     Then the posted timestamp, permalink, and platform post id are stored
+
+  Scenario: Instagram and Threads auto upload while X stays manual
+    Given generated drafts for Instagram, Threads, and X
+    When the workflow sends Slack publication notices
+    Then Instagram and Threads use automatic upload mode
+    And X uses the manual compose mode
+
+  Scenario: X manual Slack card opens a prefilled compose flow
+    Given an X draft with text and an image URL
+    When the manual Slack card is built
+    Then the card has a prefilled X compose button
+    And the card keeps a separate image button
+
+  Scenario: Instagram publish retries while media is still processing
+    Given Instagram reports that media is not yet available
+    When the Instagram uploader publishes the media container
+    Then it waits for the container and retries publishing
