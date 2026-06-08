@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Content Bot AI Periodic Flow</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --ink: #111827;
+      --muted: #5f6b7a;
+      --line: #d9e2ef;
+      --blue: #2563eb;
+      --cyan: #0e7490;
+      --green: #15803d;
+      --amber: #b45309;
+      --red: #b91c1c;
+      --soft-blue: #eaf2ff;
+      --soft-green: #eaf8ef;
+      --soft-amber: #fff6df;
+      --soft-red: #fff0f0;
+      --code: #0f172a;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+      letter-spacing: 0;
+    }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 34px 22px 56px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: end;
+      margin-bottom: 22px;
+    }
+
+    h1, h2, h3, p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 34px;
+      line-height: 1.15;
+      font-weight: 800;
+    }
+
+    h2 {
+      font-size: 22px;
+      line-height: 1.25;
+      margin-bottom: 14px;
+    }
+
+    h3 {
+      font-size: 16px;
+      line-height: 1.3;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      max-width: 780px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .stamp {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .cols-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .section {
+      margin-top: 18px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+
+    .card {
+      min-height: 100%;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfdff;
+    }
+
+    .card p,
+    li {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    ul {
+      margin: 8px 0 0;
+      padding-left: 18px;
+    }
+
+    li + li {
+      margin-top: 6px;
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #edf2f7;
+      color: var(--code);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    pre {
+      margin: 10px 0 0;
+      padding: 12px;
+      overflow: auto;
+      border-radius: 8px;
+      background: #0f172a;
+      color: #e5eefb;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+      color: inherit;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .badge.good {
+      background: var(--soft-green);
+      color: var(--green);
+      border-color: #c6ecd2;
+    }
+
+    .badge.warn {
+      background: var(--soft-amber);
+      color: var(--amber);
+      border-color: #f5df9e;
+    }
+
+    .badge.stop {
+      background: var(--soft-red);
+      color: var(--red);
+      border-color: #f5c8c8;
+    }
+
+    .badge.info {
+      background: var(--soft-blue);
+      color: var(--blue);
+      border-color: #c9dafb;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(132px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .step {
+      position: relative;
+      padding: 14px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      right: -10px;
+      top: 50%;
+      width: 10px;
+      height: 1px;
+      background: var(--line);
+    }
+
+    .step .num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--soft-blue);
+      color: var(--blue);
+      font-weight: 800;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    .step strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+
+    .step span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 12px;
+    }
+
+    .line-item {
+      display: grid;
+      grid-template-columns: 130px minmax(0, 1fr);
+      gap: 14px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfdff;
+    }
+
+    .time-label {
+      font-weight: 750;
+      color: var(--cyan);
+      font-size: 13px;
+    }
+
+    .callout {
+      padding: 14px 15px;
+      border-radius: 8px;
+      border: 1px solid #c9dafb;
+      background: var(--soft-blue);
+      color: #1e3a8a;
+    }
+
+    .callout strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .status-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      overflow: hidden;
+      border-radius: 8px;
+    }
+
+    .status-table th,
+    .status-table td {
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .status-table th {
+      background: #f1f5f9;
+      font-size: 12px;
+      color: #334155;
+      text-transform: uppercase;
+    }
+
+    .status-table td {
+      background: #fff;
+      color: var(--muted);
+    }
+
+    .status-table td:first-child {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 980px) {
+      header,
+      .cols-2,
+      .cols-3,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      .step:not(:last-child)::after {
+        display: none;
+      }
+
+      .line-item {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media print {
+      body {
+        background: #fff;
+      }
+
+      .page {
+        max-width: none;
+        padding: 0;
+      }
+
+      .section,
+      .card,
+      .step {
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div>
+        <h1>Content Bot AI 주기 실행 흐름</h1>
+        <p class="subtitle">
+          macOS launchd가 어떤 데몬을 띄우고, 한 회차가 콘텐츠 생성부터 Slack 알림,
+          Instagram/Threads 업로드, 쿨다운 재시도까지 어떻게 이어지는지 한눈에 보는 운영 문서입니다.
+        </p>
+      </div>
+      <div class="stamp">확인일: 2026-06-08 KST</div>
+    </header>
+
+    <section class="section">
+      <h2>현재 결론</h2>
+      <div class="grid cols-3">
+        <div class="card">
+          <h3>Threads JP</h3>
+          <p>토큰과 user id가 있고, 현재 설정상 비활성화되어 있지 않습니다.</p>
+          <div class="badge-row">
+            <span class="badge good">tokens.json: jp 있음</span>
+            <span class="badge info">expires: 2026-07-20</span>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Instagram JP</h3>
+          <p><code>ROUTINE_DISABLED_TARGETS=instagram:jp</code> 때문에 자동 회차에서 스킵됩니다.</p>
+          <div class="badge-row">
+            <span class="badge stop">자동 타겟 비활성화</span>
+            <span class="badge info">토큰은 존재</span>
+          </div>
+        </div>
+        <div class="card">
+          <h3>쿨다운</h3>
+          <p>JP Instagram 쿨다운 기록은 남아 있지만 <code>until=2026-05-23T07:49:49Z</code>라 현재 기준 만료되었습니다.</p>
+          <div class="badge-row">
+            <span class="badge warn">과거 기록만 있음</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>전체 흐름</h2>
+      <div class="flow">
+        <div class="step">
+          <div class="num">1</div>
+          <strong>launchd 부팅</strong>
+          <span><code>com.contentbot.content-scheduler</code>가 RunAtLoad/KeepAlive로 실행됩니다.</span>
+        </div>
+        <div class="step">
+          <div class="num">2</div>
+          <strong>운영 시간 체크</strong>
+          <span>KST 09:00-23:00 안에서만 회차를 시작합니다.</span>
+        </div>
+        <div class="step">
+          <div class="num">3</div>
+          <strong>랜덤 간격</strong>
+          <span>기본 2-3시간 랜덤 대기, 최소 2시간 보호가 적용됩니다.</span>
+        </div>
+        <div class="step">
+          <div class="num">4</div>
+          <strong>Pack 생성</strong>
+          <span><code>scripts/generate_platform_pack.py</code>가 계정별 글과 이미지를 만듭니다.</span>
+        </div>
+        <div class="step">
+          <div class="num">5</div>
+          <strong>Slack 및 업로드</strong>
+          <span>Slack에 카드가 올라가고 Instagram/Threads는 자동 업로드됩니다.</span>
+        </div>
+        <div class="step">
+          <div class="num">6</div>
+          <strong>큐 재시도</strong>
+          <span>쿨다운 draft는 5분마다 <code>queued_upload_worker</code>가 다시 시도합니다.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>주기 실행 타임라인</h2>
+      <div class="timeline">
+        <div class="line-item">
+          <div class="time-label">부팅 또는 재시작</div>
+          <div>
+            <strong>scheduler.py 시작</strong>
+            <p class="small">
+              plist: <code>launchd/com.contentbot.content-scheduler.plist</code><br>
+              실행 파일: <code>.venv/bin/python3 src/workflow/scheduler.py</code><br>
+              로그: <code>/tmp/contentbot-content-scheduler.log</code>, <code>/tmp/contentbot-content-scheduler.err</code>
+            </p>
+          </div>
+        </div>
+        <div class="line-item">
+          <div class="time-label">매 루프</div>
+          <div>
+            <strong>활성 시간과 최소 간격 확인</strong>
+            <p class="small">
+              <code>ROUTINE_ACTIVE_START_HOUR=9</code>, <code>ROUTINE_ACTIVE_END_HOUR=23</code>.
+              이전 회차 시작 시간이 <code>var/content-scheduler-state.json</code>에 저장되고,
+              최소 2시간이 지나야 다음 회차를 허용합니다.
+            </p>
+          </div>
+        </div>
+        <div class="line-item">
+          <div class="time-label">회차 시작</div>
+          <div>
+            <strong>generate_platform_pack.py 호출</strong>
+            <p class="small">
+              스케줄러는 <code>--platforms ROUTINE_PLATFORMS</code>,
+              <code>--accounts ROUTINE_ACCOUNTS</code>로 pack generator를 실행합니다.
+              현재 값은 실제 로딩 기준으로 <code>platforms=threads,instagram,x</code>,
+              <code>accounts=jp,kr</code>입니다.
+            </p>
+          </div>
+        </div>
+        <div class="line-item">
+          <div class="time-label">회차 종료 후</div>
+          <div>
+            <strong>다음 랜덤 간격 계산</strong>
+            <p class="small">
+              기본 <code>ROUTINE_MIN_HOURS=2</code>,
+              <code>ROUTINE_MAX_HOURS=3</code> 범위에서 매번 새 간격을 뽑습니다.
+              다음 시간이 운영 시간 밖이면 다음 09:00 KST까지 대기합니다.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>한 회차 내부</h2>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>계정별 pack 생성</h3>
+          <ul>
+            <li><code>kr</code>, <code>jp</code> 계정을 순회합니다.</li>
+            <li><code>ROUTINE_DISABLED_TARGETS</code>에 걸린 플랫폼/계정은 제외합니다.</li>
+            <li>Google Trends RSS와 Supabase 또는 <code>config/content_styles.json</code> 스타일 컨텍스트를 읽습니다.</li>
+            <li>Instagram 기준 글을 Codex CLI로 만들고, 실패 시 설정에 따라 Claude CLI로 폴백합니다.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>플랫폼별 변환</h3>
+          <ul>
+            <li>Instagram 글을 기준으로 Threads와 X 문구를 같은 감정선으로 변환합니다.</li>
+            <li>필수 CTA와 글자 수 제한은 코드에서 다시 보정합니다.</li>
+            <li>Threads는 500자, X는 280자, Instagram은 2200자 제한을 적용합니다.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>이미지 생성</h3>
+          <ul>
+            <li>계정별로 공유 이미지 1장을 만듭니다.</li>
+            <li><code>_call_codex_image_prompt</code>가 본문을 읽어 GPT 이미지용 영문 프롬프트를 만듭니다.</li>
+            <li><code>CODEX_IMAGE_COMMAND</code>가 로컬 PNG를 생성합니다.</li>
+            <li><code>IMAGE_PUBLIC_URL_COMMAND</code>가 Meta API에 넘길 공개 HTTPS URL을 만듭니다.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>저장, 알림, 업로드</h3>
+          <ul>
+            <li>각 플랫폼 draft가 <code>drafts/{platform}-{timestamp}-{account}.md</code>로 저장됩니다.</li>
+            <li>Slack에 본문과 이미지 미리보기가 올라갑니다.</li>
+            <li>Instagram/Threads는 Slack 알림 뒤 바로 자동 업로드됩니다.</li>
+            <li>X는 API 비용 이슈 때문에 수동 업로드 모드입니다.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>현재 설정 스냅샷</h2>
+      <table class="status-table">
+        <thead>
+          <tr>
+            <th>항목</th>
+            <th>현재 값</th>
+            <th>의미</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>대상 플랫폼</td>
+            <td><code>threads,instagram,x</code></td>
+            <td>회차마다 세 플랫폼 draft를 생성합니다.</td>
+          </tr>
+          <tr>
+            <td>대상 계정</td>
+            <td><code>jp,kr</code></td>
+            <td>JP/KR 두 계정을 순회합니다.</td>
+          </tr>
+          <tr>
+            <td>비활성 타겟</td>
+            <td><code>instagram:jp</code></td>
+            <td>JP Instagram은 자동 회차에서 제외됩니다. JP Threads는 제외되어 있지 않습니다.</td>
+          </tr>
+          <tr>
+            <td>이미지 대상</td>
+            <td><code>instagram,threads,x</code></td>
+            <td>세 플랫폼 모두 이미지 생성 대상으로 설정되어 있습니다.</td>
+          </tr>
+          <tr>
+            <td>마지막 회차 시작</td>
+            <td><code>2026-06-08T13:20:07 KST</code></td>
+            <td><code>var/content-scheduler-state.json</code> 기준입니다.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>자동 업로드와 큐</h2>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>성공 경로</h3>
+          <ul>
+            <li>Threads: <code>threads_uploader.py --text ... --account jp|kr --image-url ...</code></li>
+            <li>Instagram: <code>instagram_uploader.py --caption ... --account jp|kr --image-url ...</code></li>
+            <li>업로더는 <code>src/auth/tokens.json</code>에서 계정별 access token과 user id를 읽습니다.</li>
+            <li>만료 임박이면 <code>token_manager.py --refresh</code>를 한 번 시도합니다.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>실패 및 재시도 경로</h3>
+          <ul>
+            <li>Instagram 행동 제한이 감지되면 <code>.runtime/instagram_cooldowns.json</code>에 계정별 until을 저장합니다.</li>
+            <li>업로더 stderr에 <code>COOLDOWN_UNTIL=...</code>이 있으면 draft 상태가 <code>queued</code>로 바뀝니다.</li>
+            <li><code>queued_upload_worker.py --interval 300</code>이 5분마다 due draft를 다시 업로드합니다.</li>
+            <li><code>ROUTINE_DISABLED_TARGETS</code>에 걸린 타겟은 큐 워커도 스킵합니다.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout" style="margin-top: 14px;">
+        <strong>JP Instagram이 안 올라가는 가장 직접적인 이유</strong>
+        현재 설정에 <code>instagram:jp</code>가 비활성 타겟으로 들어가 있습니다.
+        다시 자동 회차에 포함하려면 <code>.env</code>의 <code>ROUTINE_DISABLED_TARGETS</code>에서 해당 항목을 제거하고 launchd 데몬을 재시작해야 합니다.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>운영 점검 명령</h2>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>상태 확인</h3>
+          <pre><code>tail -f /tmp/contentbot-content-scheduler.log
+tail -f /tmp/contentbot-queued-upload-worker.log
+tail -f /tmp/contentbot-slack-worker.log
+
+.venv/bin/python src/auth/token_manager.py --status</code></pre>
+        </div>
+        <div class="card">
+          <h3>JP만 수동 1회 테스트</h3>
+          <pre><code>.venv/bin/python scripts/generate_platform_pack.py \
+  --accounts jp \
+  --platforms threads,instagram
+
+.venv/bin/python src/workflow/queued_upload_worker.py --once</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>관련 파일</h2>
+      <div class="grid cols-3">
+        <div class="card">
+          <h3>데몬</h3>
+          <ul>
+            <li><code>launchd/com.contentbot.content-scheduler.plist</code></li>
+            <li><code>launchd/com.contentbot.queued-upload-worker.plist</code></li>
+            <li><code>launchd/com.contentbot.slack-worker.plist</code></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>워크플로우</h3>
+          <ul>
+            <li><code>src/workflow/scheduler.py</code></li>
+            <li><code>scripts/generate_platform_pack.py</code></li>
+            <li><code>src/workflow/content_pipeline.py</code></li>
+            <li><code>src/workflow/queued_upload_worker.py</code></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>상태 데이터</h3>
+          <ul>
+            <li><code>drafts/*.md</code></li>
+            <li><code>src/auth/tokens.json</code></li>
+            <li><code>.runtime/instagram_cooldowns.json</code></li>
+            <li><code>var/content-scheduler-state.json</code></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
