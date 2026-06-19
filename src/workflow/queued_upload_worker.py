@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""쿨다운 큐 자동 업로드 워커.
+"""쿨다운 큐 업로드 워커.
 
-Instagram/Threads 자동 업로드 중 플랫폼 쿨다운이 감지되면 draft 상태가
-`queued` 로 바뀐다. 이 워커는 queued_until 이 지난 draft 를 찾아 재시도한다.
+기본 정책은 Slack 확인 후 업로드다. 이 워커는 과거 queued draft의 자동 재시도를
+지원하지만, CONTENTBOT_ENABLE_QUEUED_AUTO_UPLOAD=1 이 명시된 경우에만 동작한다.
 """
 from __future__ import annotations
 
@@ -92,6 +92,17 @@ def _iter_queued_drafts():
 
 
 def run_once() -> dict:
+    if os.environ.get("CONTENTBOT_ENABLE_QUEUED_AUTO_UPLOAD", "").strip() != "1":
+        _log("queued 자동 업로드 비활성화 — Slack 승인 후 업로드 정책")
+        return {
+            "attempted": 0,
+            "posted": 0,
+            "requeued": 0,
+            "failed": 0,
+            "skipped": 0,
+            "disabled": True,
+        }
+
     attempted = 0
     posted = 0
     requeued = 0

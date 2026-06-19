@@ -33,6 +33,11 @@ Feature: Content publication guardrails
     When the workflow checks whether X needs an image
     Then image generation is enabled for X
 
+  Scenario: Platform pack image is shared per scheduler round
+    Given a platform pack for Korean and Japanese accounts
+    When the account pack prepares Slack review cards
+    Then every draft receives the same round image URL
+
   Scenario: Draft markdown round-trips through the application layer
     Given a draft with frontmatter and a body
     When the draft markdown is parsed and rendered again
@@ -48,10 +53,10 @@ Feature: Content publication guardrails
     When the draft lifecycle marks the draft as posted
     Then the posted timestamp, permalink, and platform post id are stored
 
-  Scenario: Instagram and Threads auto upload while X stays manual
+  Scenario: Instagram and Threads require Slack approval while X stays manual
     Given generated drafts for Instagram, Threads, and X
     When the workflow sends Slack publication notices
-    Then Instagram and Threads use automatic upload mode
+    Then Instagram and Threads use approval mode
     And X uses the manual compose mode
 
   Scenario: X manual Slack card opens a prefilled compose flow

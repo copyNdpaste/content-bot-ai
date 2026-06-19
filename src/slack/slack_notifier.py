@@ -303,6 +303,8 @@ def main():
                     choices=["approval", "auto", "manual"],
                     help="approval=버튼 승인, auto=자동 업로드 안내, manual=수동 업로드 안내")
     args = ap.parse_args()
+    if args.mode == "auto" and os.environ.get("CONTENTBOT_ALLOW_SLACK_AUTO_MODE", "").strip() != "1":
+        args.mode = "approval"
 
     draft_path = os.path.abspath(args.draft_path)
     meta, body = _parse_draft(draft_path)

@@ -3,7 +3,7 @@
 """박재범 자율 회차 스케줄러 데몬.
 
 ROUTINE_MIN_HOURS ~ ROUTINE_MAX_HOURS 사이 **랜덤** 간격 (분 단위 정밀도) 으로
-generate_platform_pack.py 를 호출 — 계정별 이미지 1장 + 플랫폼별 문구를 생성한다.
+generate_platform_pack.py 를 호출 — 회차별 이미지 1장과 플랫폼별 문구를 생성한다.
 launchd 가 RunAtLoad=true, KeepAlive=true 로 띄우는 것을 전제.
 
 env (.env 또는 launchd):
@@ -229,11 +229,12 @@ def _run_pipeline_once() -> dict:
     _log(f"회차 시작: {' '.join(cmd)}")
     _push_telegram(f"🚀 박재범 회차 시작\nplatforms={platforms} accounts={accounts}")
 
+    timeout = int(os.environ.get("ROUTINE_RUN_TIMEOUT_SEC") or "4200")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        _log("회차 타임아웃 (15분 초과)")
-        _push_telegram("⏱️ 박재범 회차 타임아웃 (15분 초과)")
+        _log(f"회차 타임아웃 ({timeout}초 초과)")
+        _push_telegram(f"⏱️ 박재범 회차 타임아웃 ({timeout}초 초과)")
         return {"ok": False, "error": "timeout"}
     except Exception as e:
         _log(f"회차 subprocess 실패: {e}")

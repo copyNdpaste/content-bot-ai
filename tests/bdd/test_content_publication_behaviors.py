@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import json
+import os
 import pathlib
 import tempfile
 import unittest
@@ -21,6 +24,8 @@ from src.domain.content_rules import (
 from src.slack import slack_notifier
 from src.uploaders import instagram_uploader
 from src.workflow import content_pipeline
+from scripts import generate_platform_pack
+from scripts import generate_gpt55_local_image
 
 
 FEATURE_PATH = pathlib.Path(__file__).with_name("features") / "content_publication.feature"
@@ -34,7 +39,11 @@ class ContentPublicationBehaviorTest(unittest.TestCase):
         self.assertIn("Scenario: Scheduler restart", feature)
         self.assertIn("Scenario: Disabled account targets", feature)
         self.assertIn("Scenario: Cooldown upload failures", feature)
-        self.assertIn("Scenario: Instagram and Threads auto upload while X stays manual", feature)
+        self.assertIn("Scenario: Platform pack image is shared per scheduler round", feature)
+        self.assertIn(
+            "Scenario: Instagram and Threads require Slack approval while X stays manual",
+            feature,
+        )
         self.assertIn("Scenario: X manual Slack card opens a prefilled compose flow", feature)
 
     def test_korean_text_always_ends_with_one_required_cta(self):
@@ -161,6 +170,207 @@ class ContentPublicationBehaviorTest(unittest.TestCase):
         # Then image generation is enabled for X
         self.assertTrue(actual)
 
+    def test_platform_pack_generates_one_shared_image_for_the_round(self):
+        written_payloads = {}
+        image_prompt_calls = []
+        generated_prompts = []
+        published_paths = []
+
+        def fake_adapt(base, platform, account, lang, style_context):
+            return {
+                "ok": True,
+                "text": f"{platform} text",
+                "hook": f"{platform} hook",
+                "hashtags": [],
+            }
+
+        def fake_image_prompt(platform, lang, post_text, hook="", hashtags=None, style_context=None):
+            image_prompt_calls.append(post_text)
+            self.assertEqual(platform, "instagram")
+            self.assertEqual(lang, "ko/ja")
+            self.assertIn("Round visual variation: round variation", post_text)
+            self.assertIn("Draft: kr/instagram", post_text)
+            self.assertIn("Draft: jp/x", post_text)
+            self.assertIn("Concept id: concept-1", post_text)
+            return {
+                "ok": True,
+                "image_keyword": "round-image-prompt",
+                "raw": "round-raw",
+            }
+
+        def fake_generate_image(prompt):
+            generated_prompts.append(prompt)
+            return "/tmp/round-image.png"
+
+        def fake_publish_image(path):
+            published_paths.append(path)
+            return "https://cdn.example/round-image.png"
+
+        def fake_write_draft(platform, account, lang, theme, payload):
+            written_payloads[(account, platform)] = dict(payload)
+            return f"/tmp/{platform}-{account}.md"
+
+        image_prompt = mock.patch.object(
+            generate_platform_pack.p,
+            "_call_codex_image_prompt",
+            side_effect=fake_image_prompt,
+        )
+        generate_image = mock.patch.object(
+            generate_platform_pack.p,
+            "_generate_codex_image",
+            side_effect=fake_generate_image,
+        )
+        publish_image = mock.patch.object(
+            generate_platform_pack.p,
+            "_publish_image_url",
+            side_effect=fake_publish_image,
+        )
+        patches = [
+            mock.patch.object(generate_platform_pack, "_disabled_targets", return_value=set()),
+            mock.patch.object(generate_platform_pack, "_adapt_for_platform", side_effect=fake_adapt),
+            mock.patch.object(generate_platform_pack.random, "choice", return_value="round variation"),
+            mock.patch.object(generate_platform_pack.p, "_fetch_trends", return_value=[]),
+            mock.patch.object(
+                generate_platform_pack.p,
+                "_load_style_context",
+                return_value={"concept": {"id": "concept-1"}},
+            ),
+            mock.patch.object(generate_platform_pack.p, "_build_persona_prompt", return_value="prompt"),
+            mock.patch.object(
+                generate_platform_pack.p,
+                "_call_codex_content",
+                return_value={
+                    "ok": True,
+                    "text": "instagram text",
+                    "hook": "instagram hook",
+                    "hashtags": [],
+                },
+            ),
+            image_prompt,
+            generate_image,
+            publish_image,
+            mock.patch.object(generate_platform_pack.p, "_write_draft", side_effect=fake_write_draft),
+            mock.patch.object(generate_platform_pack.p, "_insert_generation_artifact", return_value="artifact"),
+            mock.patch.object(
+                generate_platform_pack.p,
+                "_notify_slack",
+                return_value={"ok": True, "result": {"channel": "C123", "ts": "1.23"}},
+            ),
+            mock.patch.object(generate_platform_pack.p, "_update_generation_artifact"),
+        ]
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            with patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], patches[12], patches[13]:
+                actual = generate_platform_pack.generate_round_pack(
+                    ["kr", "jp"],
+                    "theme",
+                    ["instagram", "threads", "x"],
+                )
+
+        self.assertEqual(actual["status"], "completed")
+        self.assertEqual(actual["images_created"], 1)
+        self.assertEqual(actual["drafts_created"], 6)
+        self.assertEqual(actual["round_image_url"], "https://cdn.example/round-image.png")
+        self.assertEqual(len(image_prompt_calls), 1)
+        self.assertEqual(generated_prompts, ["round-image-prompt"])
+        self.assertEqual(published_paths, ["/tmp/round-image.png"])
+        self.assertEqual(len(written_payloads), 6)
+        self.assertEqual(
+            {payload["image_url"] for payload in written_payloads.values()},
+            {"https://cdn.example/round-image.png"},
+        )
+
+    def test_local_gpt_image_wrapper_requires_a_fresh_generated_png(self):
+        png_a = b"\x89PNG\r\n\x1a\nold"
+        png_b = b"\x89PNG\r\n\x1a\nnew"
+
+        with tempfile.TemporaryDirectory() as root:
+            old_path = pathlib.Path(root) / "old.png"
+            old_path.write_bytes(png_a)
+            before = generate_gpt55_local_image._snapshot_generated_images(root)
+            started_ns = old_path.stat().st_mtime_ns + 1_000_000_000
+
+            stale_copy = pathlib.Path(root) / "stale-copy.png"
+            stale_copy.write_bytes(png_a)
+            os.utime(stale_copy, ns=(started_ns + 1_000_000_000, started_ns + 1_000_000_000))
+            self.assertEqual(
+                generate_gpt55_local_image._fresh_generated_png(root, before, started_ns),
+                ("", ""),
+            )
+
+            fresh_path = pathlib.Path(root) / "fresh.png"
+            fresh_path.write_bytes(png_b)
+            os.utime(fresh_path, ns=(started_ns + 2_000_000_000, started_ns + 2_000_000_000))
+            actual_path, actual_hash = generate_gpt55_local_image._fresh_generated_png(
+                root,
+                before,
+                started_ns,
+            )
+            expected_hash = generate_gpt55_local_image._sha256(str(fresh_path))
+
+        self.assertEqual(actual_path, str(fresh_path))
+        self.assertEqual(actual_hash, expected_hash)
+
+    def test_local_gpt_image_wrapper_extracts_png_from_codex_json_event(self):
+        png = b"\x89PNG\r\n\x1a\ncodex-json-image"
+        stdout = "\n".join(
+            [
+                "Reading additional input from stdin...",
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "image_generation_end",
+                            "result": base64.b64encode(png).decode("ascii"),
+                        },
+                    }
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            output = pathlib.Path(root) / "image.png"
+            actual_hash = generate_gpt55_local_image._write_image_from_codex_json(
+                stdout,
+                str(output),
+            )
+            expected_hash = generate_gpt55_local_image._sha256(str(output))
+
+            self.assertEqual(output.read_bytes(), png)
+            self.assertEqual(actual_hash, expected_hash)
+
+    def test_local_gpt_image_wrapper_extracts_png_from_codex_session_jsonl(self):
+        png = b"\x89PNG\r\n\x1a\ncodex-session-image"
+        event = {
+            "type": "event_msg",
+            "payload": {
+                "type": "image_generation_end",
+                "result": base64.b64encode(png).decode("ascii"),
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as root:
+            sessions = pathlib.Path(root) / "sessions"
+            sessions.mkdir()
+            before = generate_gpt55_local_image._snapshot_files(str(sessions))
+            started_ns = 10_000_000_000
+
+            session_file = sessions / "run.jsonl"
+            session_file.write_text(json.dumps(event) + "\n", encoding="utf-8")
+            os.utime(session_file, ns=(started_ns + 1_000_000_000, started_ns + 1_000_000_000))
+
+            output = pathlib.Path(root) / "image.png"
+            actual_hash = generate_gpt55_local_image._write_image_from_codex_sessions(
+                str(sessions),
+                before,
+                started_ns,
+                str(output),
+            )
+            expected_hash = generate_gpt55_local_image._sha256(str(output))
+
+            self.assertEqual(output.read_bytes(), png)
+            self.assertEqual(actual_hash, expected_hash)
+
     def test_draft_markdown_round_trips_through_application_layer(self):
         # Given a draft with frontmatter and a body
         raw = "---\nstatus: pending\nplatform: threads\n---\n\nhello\nworld\n"
@@ -242,7 +452,7 @@ class ContentPublicationBehaviorTest(unittest.TestCase):
             self.assertIn("image_url: https://example.com/x.png", updated)
             self.assertIn("manual upload text", updated)
 
-    def test_instagram_threads_auto_upload_while_x_uses_manual_slack_mode(self):
+    def test_instagram_threads_require_approval_while_x_uses_manual_slack_mode(self):
         # Given generated drafts for Instagram, Threads, and X
         modes = {}
         uploads = []
@@ -291,13 +501,13 @@ class ContentPublicationBehaviorTest(unittest.TestCase):
                     result = content_pipeline.run_round(platform, "kr", "theme")
                     self.assertTrue(result["ok"])
 
-        # Then Instagram and Threads use automatic upload mode, while X stays manual
+        # Then Instagram and Threads wait for Slack approval, while X stays manual
         self.assertEqual(modes, {
-            "instagram": "auto",
-            "threads": "auto",
+            "instagram": "approval",
+            "threads": "approval",
             "x": "manual",
         })
-        self.assertEqual(uploads, ["instagram", "threads", "x"])
+        self.assertEqual(uploads, [])
 
     def test_x_manual_slack_card_has_prefilled_x_compose_button(self):
         body = "manual upload text\n\n👉 일본 친구 진짜 만들어보고 싶으면 → https://onlyfriends.tryproo.com/"

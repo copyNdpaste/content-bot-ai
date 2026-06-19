@@ -1094,7 +1094,7 @@ def _generate_codex_image(prompt: str, *, width: int = 1024, height: int = 1024)
 
     ts = int(time.time())
     out_path = f"/tmp/codex-image-{ts}-{random.randint(1000, 9999)}.png"
-    timeout = int(os.environ.get("CODEX_IMAGE_TIMEOUT_SEC") or "600")
+    timeout = int(os.environ.get("CODEX_IMAGE_TIMEOUT_SEC") or "3600")
 
     try:
         cmd = _format_command_template(template, {
@@ -1572,7 +1572,9 @@ def run_round(platform: str, account: str, theme: str,
     if _image_enabled_for(platform) and local_path:
         slack_upload = _slack_upload_preview(local_path, platform, account)
 
-    slack_mode = "manual" if platform == "x" else "auto"
+    # All generated posts require Slack review before upload.
+    # Instagram/Threads use approval buttons; X stays manual because API upload is disabled.
+    slack_mode = "manual" if platform == "x" else "approval"
     slack = _notify_slack(path, platform, account, mode=slack_mode)
     if isinstance(slack, dict):
         slack["upload"] = slack_upload
@@ -1582,9 +1584,7 @@ def run_round(platform: str, account: str, theme: str,
             "slack_ts": slack_result.get("ts"),
             "slack_upload_ok": bool(slack_upload.get("ok")),
         })
-    auto_upload = {"skipped": "slack_not_failed"}
-    if slack.get("ok"):
-        auto_upload = _auto_upload_after_slack(path, platform, account)
+    auto_upload = {"skipped": "requires_slack_approval"}
     return {
         "ok": True,
         "draft_path": path,
